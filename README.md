@@ -78,9 +78,9 @@ tests/integration.rs:2:    validate_body();</code></pre>
 
 ## Claude Code plugin
 
-The repository now ships a Claude Code plugin under `.claude-plugin/`, hooks under `hooks/`, and a skill under `skills/search-with-call-graph-context/`.
+The repository now ships a Claude Code plugin under `.claude-plugin/`, hooks under `hooks/`, and a skill under `skills/tracegrep/`.
 
-When Claude Code loads this plugin, the `search-with-call-graph-context` skill tells the agent to:
+When Claude Code loads this plugin, the `tracegrep` skill tells the agent to:
 
 - prefer tracegrep-aware search instead of raw shell `rg`
 - use `--json` only when structured output is needed

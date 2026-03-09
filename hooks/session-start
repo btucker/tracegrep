@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SKILL_PATH="${PLUGIN_ROOT}/skills/search-with-call-graph-context/SKILL.md"
+SKILL_PATH="${PLUGIN_ROOT}/skills/tracegrep/SKILL.md"
 SKILL_CONTENT="$(cat "${SKILL_PATH}")"
 
 escape_for_json() {
@@ -18,7 +18,7 @@ escape_for_json() {
 }
 
 SKILL_ESCAPED="$(escape_for_json "${SKILL_CONTENT}")"
-SESSION_CONTEXT="<IMPORTANT>\nThis repository ships a tracegrep plugin.\n\nUse Claude Code's built-in Grep tool for repository search when appropriate. In this repo, Grep results may be followed by tracegrep call-graph annotations from a PostToolUse hook. Avoid raw Bash \`rg\`/\`grep\` commands when \`tg\` or Grep can answer the question.\n\nBelow is the full content of the \`search-with-call-graph-context\` skill:\n\n${SKILL_ESCAPED}\n</IMPORTANT>"
+SESSION_CONTEXT="<IMPORTANT>\nThis repository ships a tracegrep plugin.\n\nUse Claude Code's built-in Grep tool for repository search when appropriate. In this repo, Grep results may be followed by tracegrep call-graph annotations from a PostToolUse hook. Avoid raw Bash \`rg\`/\`grep\` commands when \`tg\` or Grep can answer the question.\n\nBelow is the full content of the \`tracegrep\` skill:\n\n${SKILL_ESCAPED}\n</IMPORTANT>"
 
 cat <<EOF
 {

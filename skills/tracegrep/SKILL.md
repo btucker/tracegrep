@@ -1,5 +1,5 @@
 ---
-name: search-with-call-graph-context
+name: tracegrep
 description: Use when searching Rust code, tracing references or callers, or when you would normally reach for `rg` or `grep` in a repository that has `tg` available. Prefer `tg` over raw `rg` because it accepts the same search inputs while returning Rust call-graph context with the matches.
 ---
 
