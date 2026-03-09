@@ -62,7 +62,7 @@ fn collect_functions(
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(u32::try_from(i).unwrap()) {
             collect_functions(child, src, ctx, in_test_context, functions);
         }
     }
@@ -127,7 +127,7 @@ fn collect_calls(
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(u32::try_from(i).unwrap()) {
             collect_calls(child, src, call_sites, reference_sites);
         }
     }
@@ -147,7 +147,7 @@ fn collect_argument_references(
 
     let callee_name = extract_callee_name(function_node, src);
     for i in 0..arguments_node.named_child_count() {
-        if let Some(arg) = arguments_node.named_child(i) {
+        if let Some(arg) = arguments_node.named_child(u32::try_from(i).unwrap()) {
             collect_reference_exprs(arg, src, &callee_name, reference_sites);
         }
     }
@@ -188,7 +188,7 @@ fn collect_reference_exprs(
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(u32::try_from(i).unwrap()) {
             collect_reference_exprs(child, src, enclosing_callee, reference_sites);
         }
     }

@@ -92,5 +92,6 @@ fn text_if_non_empty(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
 }
 
 fn named_children(node: tree_sitter::Node) -> impl Iterator<Item = tree_sitter::Node> {
-    (0..node.named_child_count()).filter_map(move |idx| node.named_child(idx))
+    (0..node.named_child_count())
+        .filter_map(move |idx| node.named_child(u32::try_from(idx).unwrap()))
 }
