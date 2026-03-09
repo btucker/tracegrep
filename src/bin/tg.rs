@@ -8,7 +8,7 @@ fn main() -> anyhow::Result<()> {
         json_output: cli.json,
         compact: cli.compact,
         repo: &cli.repo,
-        search_path: cli.search_path.as_deref(),
+        search_paths: &cli.search_paths,
         depth: cli.depth,
         include_tests: cli.include_tests,
         include_test_callers: cli.include_test_callers,

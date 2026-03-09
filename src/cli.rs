@@ -1,10 +1,12 @@
 use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
 
 pub struct Cli {
     pub json: bool,
     pub compact: bool,
     pub repo: String,
-    pub search_path: Option<String>,
+    pub search_paths: Vec<String>,
     pub depth: usize,
     pub include_tests: bool,
     pub include_test_callers: bool,
@@ -32,7 +34,7 @@ impl Cli {
             json: false,
             compact: false,
             repo: ".".to_string(),
-            search_path: None,
+            search_paths: Vec::new(),
             depth: 1,
             include_tests: false,
             include_test_callers: false,
@@ -41,7 +43,6 @@ impl Cli {
         };
 
         let mut passthrough = Vec::new();
-        let mut repo_override: Option<String> = None;
         let mut after_delimiter = false;
         let mut idx = 0;
         while idx < args.len() {
@@ -72,15 +73,6 @@ impl Cli {
                         idx += 1;
                         continue;
                     }
-                    "--repo" | "-r" => {
-                        idx += 1;
-                        let value = args
-                            .get(idx)
-                            .ok_or_else(|| anyhow::anyhow!("missing value for --repo"))?;
-                        repo_override = Some(value.clone());
-                        idx += 1;
-                        continue;
-                    }
                     "--depth" => {
                         idx += 1;
                         let value = args
@@ -105,29 +97,16 @@ impl Cli {
 
         let ParsedPassthrough {
             pattern,
-            search_path,
+            search_paths,
             rg_args,
         } = parse_passthrough(&passthrough, after_delimiter)?;
         cli.pattern = pattern;
         cli.rg_args = rg_args;
 
-        if let Some(repo) = repo_override {
+        if !search_paths.is_empty() {
+            let (repo, relative_paths) = infer_multi_path_repo_and_paths(&search_paths)?;
             cli.repo = repo;
-            cli.search_path = search_path;
-        } else if let Some(path) = search_path {
-            let path_buf = Path::new(&path);
-            if path_buf.is_file() {
-                cli.repo = path_buf
-                    .parent()
-                    .map(|parent| parent.to_string_lossy().into_owned())
-                    .filter(|parent| !parent.is_empty())
-                    .unwrap_or_else(|| ".".to_string());
-                cli.search_path = path_buf
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned());
-            } else {
-                cli.repo = path;
-            }
+            cli.search_paths = relative_paths;
         }
 
         Ok(cli)
@@ -136,11 +115,12 @@ impl Cli {
     fn help_text() -> String {
         format!(
             "tracegrep {}\n\n\
-Search code with ripgrep and Rust call graph context.\n\n\
-Usage:\n  tracegrep [flags/rg flags] <pattern> [path]\n\n\
-Tracegrep flags:\n  --json                  Output enriched results as JSON\n  --compact               Collapse human-readable context onto the location line\n  -r, --repo <PATH>       Search root override (same role as positional [path])\n  --depth <N>             How many caller levels to show (default: 1)\n  --include-tests         Include test files and #[cfg(test)] functions in the graph\n  --include-test-callers  Show callers that originate from test code\n  -h, --help              Print help\n  -V, --version           Print version\n\n\
+Search code with ripgrep and language-aware call graph context.\n\n\
+Usage:\n  tracegrep [flags/rg flags] <pattern> [path ...]\n\n\
+Supported files: .rs, .py, .js, .jsx, .ts, .tsx\n\n\
+Tracegrep flags:\n  --json                  Output enriched results as JSON\n  --compact               Collapse human-readable context onto the location line\n  --depth <N>             How many caller levels to show (default: 1)\n  --include-tests         Include test-file callers and references in the graph\n  --include-test-callers  Show callers that originate from test code\n  -h, --help              Print help\n  -V, --version           Print version\n\n\
 Any unrecognized flags before <pattern> are forwarded to rg.\n\
-Only a single positional [path] is supported.\n",
+Positional [path ...] arguments use rg semantics.\n",
             env!("CARGO_PKG_VERSION")
         )
     }
@@ -148,7 +128,7 @@ Only a single positional [path] is supported.\n",
 
 struct ParsedPassthrough {
     pattern: String,
-    search_path: Option<String>,
+    search_paths: Vec<String>,
     rg_args: Vec<String>,
 }
 
@@ -164,16 +144,11 @@ fn parse_passthrough(
         .iter()
         .rev()
         .take_while(|arg| looks_like_path(arg))
-        .count();
-    if trailing_paths > 1 {
-        anyhow::bail!("multiple positional paths are not supported; use a single [path] or --repo");
-    }
+        .count()
+        .min(args.len().saturating_sub(1));
 
-    let (pattern_idx, search_path) = if trailing_paths == 1 && args.len() >= 2 {
-        (args.len() - 2, Some(args[args.len() - 1].clone()))
-    } else {
-        (args.len() - 1, None)
-    };
+    let pattern_idx = args.len() - trailing_paths - 1;
+    let search_paths = args[pattern_idx + 1..].to_vec();
 
     let pattern = args[pattern_idx].clone();
     if pattern.starts_with('-') && !allow_dash_pattern {
@@ -182,7 +157,7 @@ fn parse_passthrough(
 
     Ok(ParsedPassthrough {
         pattern,
-        search_path,
+        search_paths,
         rg_args: args[..pattern_idx].to_vec(),
     })
 }
@@ -190,4 +165,95 @@ fn parse_passthrough(
 fn looks_like_path(value: &str) -> bool {
     let path = Path::new(value);
     path.exists() || value == "." || value == ".." || value.contains(std::path::MAIN_SEPARATOR)
+}
+
+fn infer_multi_path_repo_and_paths(
+    search_paths: &[String],
+) -> anyhow::Result<(String, Vec<String>)> {
+    let cwd = std::env::current_dir()?;
+    let mut resolved_targets = Vec::with_capacity(search_paths.len());
+    let mut bases = Vec::with_capacity(search_paths.len());
+    let mut git_roots = Vec::with_capacity(search_paths.len());
+
+    for path in search_paths {
+        let resolved = cwd
+            .join(path)
+            .canonicalize()
+            .map_err(|error| anyhow::anyhow!("failed to resolve search path {path:?}: {error}"))?;
+        let base = if resolved.is_file() {
+            resolved
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            resolved.clone()
+        };
+        resolved_targets.push(resolved);
+        git_roots.push(git_top_level(&base)?);
+        bases.push(base);
+    }
+
+    let repo_path = infer_repo_root(&git_roots, &bases)?;
+    let relative_paths = resolved_targets
+        .into_iter()
+        .map(|path| relativize_to_repo(&repo_path, &path))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    Ok((repo_path.to_string_lossy().into_owned(), relative_paths))
+}
+
+fn common_ancestor(paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut ancestor = paths.first()?.clone();
+    for path in &paths[1..] {
+        while !path.starts_with(&ancestor) {
+            ancestor = ancestor.parent()?.to_path_buf();
+        }
+    }
+    Some(ancestor)
+}
+
+fn infer_repo_root(git_roots: &[Option<PathBuf>], bases: &[PathBuf]) -> anyhow::Result<PathBuf> {
+    let mut distinct_git_roots = git_roots.iter().flatten();
+    if let Some(first) = distinct_git_roots.next() {
+        if distinct_git_roots.all(|root| root == first) {
+            return Ok(first.clone());
+        }
+        anyhow::bail!("positional paths must belong to the same git repository");
+    }
+
+    common_ancestor(bases)
+        .ok_or_else(|| anyhow::anyhow!("failed to determine a common root for positional paths"))
+}
+
+fn git_top_level(path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let root = String::from_utf8(output.stdout)?.trim().to_string();
+    if root.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(PathBuf::from(root)))
+    }
+}
+
+fn relativize_to_repo(repo_path: &Path, target: &Path) -> anyhow::Result<String> {
+    let relative = target.strip_prefix(repo_path).map_err(|_| {
+        anyhow::anyhow!(
+            "search path {} is outside inferred root {}",
+            target.display(),
+            repo_path.display()
+        )
+    })?;
+
+    if relative.as_os_str().is_empty() {
+        Ok(".".to_string())
+    } else {
+        Ok(relative.to_string_lossy().into_owned())
+    }
 }

@@ -1,5 +1,49 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    Rust,
+    Python,
+    JavaScript,
+    Jsx,
+    TypeScript,
+    Tsx,
+}
+
+impl Language {
+    pub const ALL: [Language; 6] = [
+        Language::Rust,
+        Language::Python,
+        Language::JavaScript,
+        Language::Jsx,
+        Language::TypeScript,
+        Language::Tsx,
+    ];
+
+    pub fn cache_key(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::JavaScript => "javascript",
+            Self::Jsx => "jsx",
+            Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::Python => "Python",
+            Self::JavaScript => "JavaScript",
+            Self::Jsx => "JSX",
+            Self::TypeScript => "TypeScript",
+            Self::Tsx => "TSX",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallGraph {
     pub nodes: Vec<GraphNode>,
@@ -13,6 +57,7 @@ pub struct GraphNode {
     pub id: usize,
     pub name: String,
     pub qualified_name: String,
+    pub language: Language,
     pub file: String,
     #[serde(default)]
     pub is_test: bool,
@@ -46,6 +91,7 @@ pub struct GraphReference {
 pub struct FnDef {
     pub name: String,
     pub qualified_name: String,
+    pub language: Language,
     pub file: String,
     pub is_test: bool,
     pub line: usize,
@@ -81,6 +127,7 @@ pub struct ReferenceSite {
 pub struct FunctionArtifact {
     pub name: String,
     pub qualified_name: String,
+    pub language: Language,
     pub is_test: bool,
     pub line: usize,
     pub end_line: usize,

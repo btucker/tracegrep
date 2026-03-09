@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::analysis;
-use crate::analysis::codepaths::{self, CallGraph, FileArtifact};
+use crate::analysis::codepaths::{self, merge_graphs, CallGraph, FileArtifact, Language};
 
 const CACHE_DIR: &str = ".cache/tracegrep";
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadGraphMode {
@@ -34,8 +34,22 @@ struct CacheState {
     schema_version: u32,
     repo_path: String,
     include_tests: bool,
+    language: Language,
     head: String,
     files: BTreeMap<String, FileArtifact>,
+}
+
+struct LanguageLoadResult {
+    graph: CallGraph,
+    outcome: LoadGraphOutcome,
+}
+
+fn empty_graph() -> CallGraph {
+    CallGraph {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        references: Vec::new(),
+    }
 }
 
 fn hex_hash(bytes: &[u8]) -> String {
@@ -62,22 +76,32 @@ fn repo_cache_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
         .join(format!("{slug}-{hash}")))
 }
 
-pub fn graph_cache_path(repo_path: &Path, include_tests: bool) -> anyhow::Result<PathBuf> {
+pub fn graph_cache_path(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+) -> anyhow::Result<PathBuf> {
     let cache_dir = repo_cache_dir(repo_path)?;
-    if include_tests {
-        Ok(cache_dir.join("codepaths.v3.graph.with-tests"))
-    } else {
-        Ok(cache_dir.join("codepaths.v3.graph"))
-    }
+    let suffix = if include_tests { "with-tests" } else { "prod" };
+    Ok(cache_dir.join(format!(
+        "codepaths.v{SCHEMA_VERSION}.{}.{}.graph",
+        language.cache_key(),
+        suffix
+    )))
 }
 
-pub fn state_cache_path(repo_path: &Path, include_tests: bool) -> anyhow::Result<PathBuf> {
+pub fn state_cache_path(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+) -> anyhow::Result<PathBuf> {
     let cache_dir = repo_cache_dir(repo_path)?;
-    if include_tests {
-        Ok(cache_dir.join("codepaths.v3.state.with-tests.json"))
-    } else {
-        Ok(cache_dir.join("codepaths.v3.state.json"))
-    }
+    let suffix = if include_tests { "with-tests" } else { "prod" };
+    Ok(cache_dir.join(format!(
+        "codepaths.v{SCHEMA_VERSION}.{}.{}.state.json",
+        language.cache_key(),
+        suffix
+    )))
 }
 
 fn head_hash(repo_path: &Path) -> anyhow::Result<String> {
@@ -91,14 +115,23 @@ fn head_hash(repo_path: &Path) -> anyhow::Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
-fn read_graph(repo_path: &Path, include_tests: bool) -> anyhow::Result<CallGraph> {
-    let path = graph_cache_path(repo_path, include_tests)?;
+fn read_graph(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+) -> anyhow::Result<CallGraph> {
+    let path = graph_cache_path(repo_path, include_tests, language)?;
     let data = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&data)?)
 }
 
-fn write_graph(repo_path: &Path, include_tests: bool, graph: &CallGraph) -> anyhow::Result<()> {
-    let path = graph_cache_path(repo_path, include_tests)?;
+fn write_graph(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+    graph: &CallGraph,
+) -> anyhow::Result<()> {
+    let path = graph_cache_path(repo_path, include_tests, language)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -106,14 +139,23 @@ fn write_graph(repo_path: &Path, include_tests: bool, graph: &CallGraph) -> anyh
     Ok(())
 }
 
-fn read_state(repo_path: &Path, include_tests: bool) -> anyhow::Result<CacheState> {
-    let path = state_cache_path(repo_path, include_tests)?;
+fn read_state(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+) -> anyhow::Result<CacheState> {
+    let path = state_cache_path(repo_path, include_tests, language)?;
     let data = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&data)?)
 }
 
-fn write_state(repo_path: &Path, include_tests: bool, state: &CacheState) -> anyhow::Result<()> {
-    let path = state_cache_path(repo_path, include_tests)?;
+fn write_state(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+    state: &CacheState,
+) -> anyhow::Result<()> {
+    let path = state_cache_path(repo_path, include_tests, language)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -121,8 +163,9 @@ fn write_state(repo_path: &Path, include_tests: bool, state: &CacheState) -> any
     Ok(())
 }
 
-fn is_relevant_rust_path(path: &str, include_tests: bool) -> bool {
-    path.ends_with(".rs") && (include_tests || !analysis::is_test_file(path))
+fn is_relevant_path(path: &str, include_tests: bool, language: Language) -> bool {
+    let extension_language = codepaths::language_for_path(Path::new(path));
+    extension_language == Some(language) && (include_tests || !analysis::is_test_file(path))
 }
 
 fn run_git_bytes(repo_path: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
@@ -136,7 +179,7 @@ fn run_git_bytes(repo_path: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-fn parse_name_status_z(output: &[u8], include_tests: bool) -> Vec<String> {
+fn parse_name_status_z(output: &[u8], include_tests: bool, language: Language) -> Vec<String> {
     let mut parts = output
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty());
@@ -153,10 +196,10 @@ fn parse_name_status_z(output: &[u8], include_tests: bool) -> Vec<String> {
             };
             let old_path = String::from_utf8_lossy(old_path).into_owned();
             let new_path = String::from_utf8_lossy(new_path).into_owned();
-            if is_relevant_rust_path(&old_path, include_tests) {
+            if is_relevant_path(&old_path, include_tests, language) {
                 changed.push(old_path);
             }
-            if is_relevant_rust_path(&new_path, include_tests) {
+            if is_relevant_path(&new_path, include_tests, language) {
                 changed.push(new_path);
             }
             continue;
@@ -166,7 +209,7 @@ fn parse_name_status_z(output: &[u8], include_tests: bool) -> Vec<String> {
             break;
         };
         let path = String::from_utf8_lossy(path).into_owned();
-        if is_relevant_rust_path(&path, include_tests) {
+        if is_relevant_path(&path, include_tests, language) {
             changed.push(path);
         }
     }
@@ -179,6 +222,7 @@ fn committed_changed_paths(
     previous_head: &str,
     current_head: &str,
     include_tests: bool,
+    language: Language,
 ) -> anyhow::Result<Vec<String>> {
     if previous_head == current_head {
         return Ok(Vec::new());
@@ -195,13 +239,18 @@ fn committed_changed_paths(
             "--",
         ],
     )?;
-    Ok(parse_name_status_z(&output, include_tests))
+    Ok(parse_name_status_z(&output, include_tests, language))
 }
 
-fn dirty_changed_paths(repo_path: &Path, include_tests: bool) -> anyhow::Result<Vec<String>> {
+fn dirty_changed_paths(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+) -> anyhow::Result<Vec<String>> {
     let mut changed = parse_name_status_z(
         &run_git_bytes(repo_path, &["diff", "--name-status", "-z", "HEAD", "--"])?,
         include_tests,
+        language,
     );
 
     let untracked = run_git_bytes(
@@ -213,21 +262,22 @@ fn dirty_changed_paths(repo_path: &Path, include_tests: bool) -> anyhow::Result<
             .split(|byte| *byte == 0)
             .filter(|part| !part.is_empty())
             .filter_map(|path| String::from_utf8(path.to_vec()).ok())
-            .filter(|path| is_relevant_rust_path(path, include_tests)),
+            .filter(|path| is_relevant_path(path, include_tests, language)),
     );
 
     Ok(changed)
 }
 
 fn build_file_artifact(
-    parser: &mut tree_sitter::Parser,
     relative_path: &str,
     path: &Path,
     include_tests: bool,
+    language: Language,
+    parser: &mut tree_sitter::Parser,
 ) -> anyhow::Result<FileArtifact> {
     let source = std::fs::read_to_string(path)?;
     let mut artifact =
-        codepaths::extract_from_source(&source, relative_path, include_tests, parser)
+        codepaths::extract_from_source(&source, relative_path, include_tests, language, parser)
             .ok_or_else(|| anyhow::anyhow!("failed to parse {}", path.display()))?;
     artifact.source_hash = hex_hash(source.as_bytes());
     Ok(artifact)
@@ -236,54 +286,50 @@ fn build_file_artifact(
 fn build_all_artifacts(
     repo_path: &Path,
     include_tests: bool,
+    language: Language,
 ) -> anyhow::Result<BTreeMap<String, FileArtifact>> {
-    let mut parser = codepaths::new_parser()?;
+    let mut parser = codepaths::new_parser(language)?;
     let mut files = BTreeMap::new();
 
-    for (relative_path, path) in codepaths::collect_relevant_rust_files(repo_path, include_tests) {
+    for (relative_path, path) in
+        codepaths::collect_relevant_files_for_language(repo_path, include_tests, language)
+    {
         files.insert(
             relative_path.clone(),
-            build_file_artifact(&mut parser, &relative_path, &path, include_tests)?,
+            build_file_artifact(&relative_path, &path, include_tests, language, &mut parser)?,
         );
     }
 
     Ok(files)
 }
 
-fn full_rebuild(
+fn full_rebuild_language(
     repo_path: &Path,
     include_tests: bool,
     current_head: &str,
-) -> anyhow::Result<LoadGraphResult> {
-    eprintln!("Building call graph...");
-    let files = build_all_artifacts(repo_path, include_tests)?;
+    language: Language,
+) -> anyhow::Result<LanguageLoadResult> {
+    eprintln!("Building {} graph...", language.display_name());
+    let files = build_all_artifacts(repo_path, include_tests, language)?;
     let graph = codepaths::build_graph_from_artifacts(&files);
-    eprintln!(
-        "Call graph: {} nodes, {} edges, {} references",
-        graph.nodes.len(),
-        graph.edges.len(),
-        graph.references.len()
-    );
-
     let changed_files = files.keys().cloned().collect::<Vec<_>>();
-    write_graph(repo_path, include_tests, &graph)?;
+
+    write_graph(repo_path, include_tests, language, &graph)?;
     write_state(
         repo_path,
         include_tests,
+        language,
         &CacheState {
             schema_version: SCHEMA_VERSION,
             repo_path: repo_path.display().to_string(),
             include_tests,
+            language,
             head: current_head.to_string(),
             files,
         },
     )?;
-    eprintln!(
-        "Call graph cached to {}",
-        graph_cache_path(repo_path, include_tests)?.display()
-    );
 
-    Ok(LoadGraphResult {
+    Ok(LanguageLoadResult {
         graph,
         outcome: LoadGraphOutcome {
             mode: LoadGraphMode::FullRebuild,
@@ -292,15 +338,17 @@ fn full_rebuild(
     })
 }
 
-fn incremental_rebuild(
+fn incremental_rebuild_language(
     repo_path: &Path,
     include_tests: bool,
     current_head: &str,
+    language: Language,
     mut state: CacheState,
     changed_files: &[String],
-) -> anyhow::Result<LoadGraphResult> {
-    let mut parser = codepaths::new_parser()?;
-    let current_files = codepaths::collect_relevant_rust_files(repo_path, include_tests);
+) -> anyhow::Result<LanguageLoadResult> {
+    let mut parser = codepaths::new_parser(language)?;
+    let current_files =
+        codepaths::collect_relevant_files_for_language(repo_path, include_tests, language);
 
     for removed in state
         .files
@@ -314,7 +362,8 @@ fn incremental_rebuild(
 
     for changed in changed_files {
         if let Some(path) = current_files.get(changed) {
-            let artifact = build_file_artifact(&mut parser, changed, path, include_tests)?;
+            let artifact =
+                build_file_artifact(changed, path, include_tests, language, &mut parser)?;
             state.files.insert(changed.clone(), artifact);
         } else {
             state.files.remove(changed);
@@ -324,15 +373,16 @@ fn incremental_rebuild(
     let graph = codepaths::build_graph_from_artifacts(&state.files);
     state.head = current_head.to_string();
 
-    write_graph(repo_path, include_tests, &graph)?;
-    write_state(repo_path, include_tests, &state)?;
+    write_graph(repo_path, include_tests, language, &graph)?;
+    write_state(repo_path, include_tests, language, &state)?;
     eprintln!(
-        "Incrementally rebuilding call graph ({} changed file{})",
+        "Incrementally rebuilding {} graph ({} changed file{})",
+        language.display_name(),
         changed_files.len(),
         if changed_files.len() == 1 { "" } else { "s" }
     );
 
-    Ok(LoadGraphResult {
+    Ok(LanguageLoadResult {
         graph,
         outcome: LoadGraphOutcome {
             mode: LoadGraphMode::Incremental,
@@ -341,29 +391,49 @@ fn incremental_rebuild(
     })
 }
 
-pub fn load_or_build_graph(
+fn load_or_build_graph_for_language(
     repo_path: &Path,
     include_tests: bool,
-) -> anyhow::Result<LoadGraphResult> {
-    let current_head = head_hash(repo_path)?;
-    let state = read_state(repo_path, include_tests);
-    let graph = read_graph(repo_path, include_tests);
+    current_head: &str,
+    language: Language,
+) -> anyhow::Result<Option<LanguageLoadResult>> {
+    let current_files =
+        codepaths::collect_relevant_files_for_language(repo_path, include_tests, language);
+    let state = read_state(repo_path, include_tests, language);
+    let graph = read_graph(repo_path, include_tests, language);
+    let has_cache = state.is_ok() || graph.is_ok();
+
+    if current_files.is_empty() && !has_cache {
+        return Ok(None);
+    }
 
     let (mut state, graph) = match (state, graph) {
         (Ok(state), Ok(graph))
             if state.schema_version == SCHEMA_VERSION
                 && state.repo_path == repo_path.display().to_string()
-                && state.include_tests == include_tests =>
+                && state.include_tests == include_tests
+                && state.language == language =>
         {
             (state, graph)
         }
-        _ => return full_rebuild(repo_path, include_tests, &current_head),
+        _ => {
+            return Ok(Some(full_rebuild_language(
+                repo_path,
+                include_tests,
+                current_head,
+                language,
+            )?))
+        }
     };
 
-    let current_files = codepaths::collect_relevant_rust_files(repo_path, include_tests);
-    let mut changed_files =
-        committed_changed_paths(repo_path, &state.head, &current_head, include_tests)?;
-    changed_files.extend(dirty_changed_paths(repo_path, include_tests)?);
+    let mut changed_files = committed_changed_paths(
+        repo_path,
+        &state.head,
+        current_head,
+        include_tests,
+        language,
+    )?;
+    changed_files.extend(dirty_changed_paths(repo_path, include_tests, language)?);
     changed_files.extend(
         state
             .files
@@ -382,26 +452,84 @@ pub fn load_or_build_graph(
 
     if changed_files.is_empty() {
         if state.head != current_head {
-            state.head = current_head;
-            write_state(repo_path, include_tests, &state)?;
-            eprintln!("Reusing cached call graph (HEAD changed, no relevant Rust changes)");
+            state.head = current_head.to_string();
+            write_state(repo_path, include_tests, language, &state)?;
+            eprintln!(
+                "Reusing cached {} graph (HEAD changed, no relevant source changes)",
+                language.display_name()
+            );
         } else {
-            eprintln!("Reusing cached call graph");
+            eprintln!("Reusing cached {} graph", language.display_name());
         }
-        return Ok(LoadGraphResult {
+        return Ok(Some(LanguageLoadResult {
             graph,
             outcome: LoadGraphOutcome {
                 mode: LoadGraphMode::Reused,
                 changed_files,
             },
-        });
+        }));
     }
 
-    incremental_rebuild(
+    Ok(Some(incremental_rebuild_language(
         repo_path,
         include_tests,
-        &current_head,
+        current_head,
+        language,
         state,
         &changed_files,
-    )
+    )?))
+}
+
+pub fn load_or_build_graph(
+    repo_path: &Path,
+    include_tests: bool,
+) -> anyhow::Result<LoadGraphResult> {
+    let current_head = head_hash(repo_path)?;
+    let mut graphs = Vec::new();
+    let mut changed_files = Vec::new();
+    let mut mode = LoadGraphMode::Reused;
+
+    for language in Language::ALL {
+        let Some(result) =
+            load_or_build_graph_for_language(repo_path, include_tests, &current_head, language)?
+        else {
+            continue;
+        };
+
+        if !result.graph.nodes.is_empty()
+            || !result.graph.edges.is_empty()
+            || !result.graph.references.is_empty()
+        {
+            graphs.push(result.graph);
+        }
+        changed_files.extend(result.outcome.changed_files);
+        mode = merge_mode(mode, result.outcome.mode);
+    }
+
+    changed_files.sort();
+    changed_files.dedup();
+
+    Ok(LoadGraphResult {
+        graph: if graphs.is_empty() {
+            empty_graph()
+        } else {
+            merge_graphs(&graphs)
+        },
+        outcome: LoadGraphOutcome {
+            mode,
+            changed_files,
+        },
+    })
+}
+
+fn merge_mode(current: LoadGraphMode, next: LoadGraphMode) -> LoadGraphMode {
+    match (current, next) {
+        (LoadGraphMode::FullRebuild, _) | (_, LoadGraphMode::FullRebuild) => {
+            LoadGraphMode::FullRebuild
+        }
+        (LoadGraphMode::Incremental, _) | (_, LoadGraphMode::Incremental) => {
+            LoadGraphMode::Incremental
+        }
+        _ => LoadGraphMode::Reused,
+    }
 }

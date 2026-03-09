@@ -3,17 +3,17 @@ mod graph;
 mod parsing;
 mod types;
 
-pub use graph::{build_graph_from_artifacts, QueryDirection};
+pub use graph::{build_graph_from_artifacts, merge_graphs, QueryDirection};
 pub(crate) use parsing::extract_from_source;
 pub use types::{
     CallGraph, CallSite, CodePath, CodePathsResult, FileArtifact, FnDef, FunctionArtifact,
-    GraphEdge, GraphNode, GraphReference, GraphReferenceKind, ReferenceSite,
+    GraphEdge, GraphNode, GraphReference, GraphReferenceKind, Language, ReferenceSite,
 };
 
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use enumeration::{enumerate_paths, find_roots};
 use graph::{
@@ -23,19 +23,42 @@ use graph::{
 
 use super::is_test_file;
 
-pub fn new_parser() -> Result<tree_sitter::Parser> {
+pub fn new_parser(language: Language) -> Result<tree_sitter::Parser> {
     let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_rust::LANGUAGE.into())
-        .context("Failed to set tree-sitter Rust language")?;
+    let ts_language = match language {
+        Language::Rust => tree_sitter_rust::LANGUAGE.into(),
+        Language::Python => tree_sitter_python::LANGUAGE.into(),
+        Language::JavaScript | Language::Jsx => tree_sitter_javascript::LANGUAGE.into(),
+        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+    };
+    parser.set_language(&ts_language).with_context(|| {
+        format!(
+            "Failed to set tree-sitter {} language",
+            language.display_name()
+        )
+    })?;
     Ok(parser)
 }
 
-pub fn collect_relevant_rust_files(
+pub fn language_for_path(path: &Path) -> Option<Language> {
+    let extension = path.extension()?.to_str()?;
+    match extension {
+        "rs" => Some(Language::Rust),
+        "py" => Some(Language::Python),
+        "js" => Some(Language::JavaScript),
+        "jsx" => Some(Language::Jsx),
+        "ts" => Some(Language::TypeScript),
+        "tsx" => Some(Language::Tsx),
+        _ => None,
+    }
+}
+
+pub fn collect_relevant_source_files(
     repo_path: &Path,
     include_tests: bool,
-) -> BTreeMap<String, std::path::PathBuf> {
-    let mut files = BTreeMap::new();
+) -> BTreeMap<Language, BTreeMap<String, PathBuf>> {
+    let mut files: BTreeMap<Language, BTreeMap<String, PathBuf>> = BTreeMap::new();
     let walker = WalkBuilder::new(repo_path).build();
 
     for entry in walker {
@@ -48,9 +71,9 @@ pub fn collect_relevant_rust_files(
         if !path.is_file() {
             continue;
         }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+        let Some(language) = language_for_path(path) else {
             continue;
-        }
+        };
 
         let relative = match path.strip_prefix(repo_path) {
             Ok(relative) => relative.to_string_lossy().to_string(),
@@ -59,32 +82,47 @@ pub fn collect_relevant_rust_files(
         if !include_tests && is_test_file(&relative) {
             continue;
         }
-        files.insert(relative, path.to_path_buf());
+        files
+            .entry(language)
+            .or_default()
+            .insert(relative, path.to_path_buf());
     }
 
     files
+}
+
+pub fn collect_relevant_files_for_language(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+) -> BTreeMap<String, PathBuf> {
+    collect_relevant_source_files(repo_path, include_tests)
+        .remove(&language)
+        .unwrap_or_default()
 }
 
 pub fn analyze_and_build_graph(
     repo_path: &Path,
     include_tests: bool,
 ) -> Result<(CodePathsResult, CallGraph)> {
-    let mut parser = new_parser()?;
-    let relevant_files = collect_relevant_rust_files(repo_path, include_tests);
+    let relevant_files = collect_relevant_source_files(repo_path, include_tests);
     let mut artifacts = BTreeMap::new();
 
-    for (relative, path) in relevant_files {
-        let source = match std::fs::read_to_string(path) {
-            Ok(source) => source,
-            Err(_) => continue,
-        };
-        let Some(mut artifact) =
-            extract_from_source(&source, &relative, include_tests, &mut parser)
-        else {
-            continue;
-        };
-        artifact.source_hash = String::new();
-        artifacts.insert(relative, artifact);
+    for (language, files) in relevant_files {
+        let mut parser = new_parser(language)?;
+        for (relative, path) in files {
+            let source = match std::fs::read_to_string(path) {
+                Ok(source) => source,
+                Err(_) => continue,
+            };
+            let Some(mut artifact) =
+                extract_from_source(&source, &relative, include_tests, language, &mut parser)
+            else {
+                continue;
+            };
+            artifact.source_hash = String::new();
+            artifacts.insert(relative, artifact);
+        }
     }
 
     let files: Vec<InternalFile> = artifacts

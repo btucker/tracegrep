@@ -61,13 +61,49 @@ fn handle(method: &str) {}
     dir
 }
 
+fn run_tracegrep(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_tracegrep"))
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap()
+}
+
+fn create_repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, contents) in files {
+        let full_path = dir.path().join(path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(full_path, contents).unwrap();
+    }
+
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .unwrap()
+    };
+
+    run(&["init"]);
+    run(&["config", "user.email", "test@test.com"]);
+    run(&["config", "user.name", "Test"]);
+    run(&["add", "."]);
+    run(&["commit", "-m", "initial"]);
+
+    dir
+}
+
 #[test]
 fn test_query_finds_matches_with_call_context() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["--repo", dir.path().to_str().unwrap(), "validate_body"])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["validate_body"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -86,15 +122,7 @@ fn test_query_finds_matches_with_call_context() {
 #[test]
 fn test_query_json_output() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args([
-            "--repo",
-            dir.path().to_str().unwrap(),
-            "--json",
-            "validate_body",
-        ])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["--json", "validate_body"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -112,6 +140,7 @@ fn test_query_json_output() {
         assert!(parsed.get("line").is_some());
         if parsed.get("callers").is_some() {
             found_enriched_match = true;
+            assert!(parsed.get("language").is_some());
         }
         found_match = true;
     }
@@ -122,15 +151,7 @@ fn test_query_json_output() {
 #[test]
 fn test_query_shows_branch_conditions() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args([
-            "--repo",
-            dir.path().to_str().unwrap(),
-            "--json",
-            "validate_body",
-        ])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["--json", "validate_body"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(output.status.success());
@@ -180,10 +201,7 @@ fn test_query_auto_builds_graph() {
     run(&["add", "."]);
     run(&["commit", "-m", "init"]);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["--repo", dir.path().to_str().unwrap(), "hello"])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["hello"]);
 
     assert!(
         output.status.success(),
@@ -196,16 +214,7 @@ fn test_query_auto_builds_graph() {
 #[test]
 fn test_query_passes_rg_flags() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args([
-            "--repo",
-            dir.path().to_str().unwrap(),
-            "-t",
-            "rust",
-            "validate_body",
-        ])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["-t", "rust", "validate_body"]);
 
     assert!(
         output.status.success(),
@@ -220,10 +229,7 @@ fn test_query_passes_rg_flags() {
 #[test]
 fn test_query_accepts_rg_style_positional_path() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["validate_body", dir.path().to_str().unwrap()])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["validate_body", "."]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -236,17 +242,9 @@ fn test_query_accepts_rg_style_positional_path() {
 }
 
 #[test]
-fn test_query_scopes_search_with_repo_override_and_positional_path() {
+fn test_query_scopes_search_with_positional_path() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args([
-            "--repo",
-            dir.path().to_str().unwrap(),
-            "validate_body",
-            "src",
-        ])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["validate_body", "src"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -262,17 +260,25 @@ fn test_query_scopes_search_with_repo_override_and_positional_path() {
 }
 
 #[test]
+fn test_query_accepts_multiple_positional_paths() {
+    let dir = create_query_test_repo();
+    let output = run_tracegrep(dir.path(), &["validate_body", "src", "tests"]);
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("src/main.rs"), "stdout:\n{stdout}");
+    assert!(stdout.contains("tests/integration.rs"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+}
+
+#[test]
 fn test_query_uses_rg_style_colors_when_forced() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args([
-            "--repo",
-            dir.path().to_str().unwrap(),
-            "--color=always",
-            "validate_body",
-        ])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["--color=always", "validate_body"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -295,15 +301,7 @@ fn test_query_uses_rg_style_colors_when_forced() {
 #[test]
 fn test_query_respects_color_never() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args([
-            "--repo",
-            dir.path().to_str().unwrap(),
-            "--color=never",
-            "validate_body",
-        ])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["--color=never", "validate_body"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -317,15 +315,7 @@ fn test_query_respects_color_never() {
 #[test]
 fn test_query_hides_test_callers_by_default() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args([
-            "--repo",
-            dir.path().to_str().unwrap(),
-            "--include-tests",
-            "validate_body",
-        ])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["--include-tests", "validate_body"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -340,16 +330,10 @@ fn test_query_hides_test_callers_by_default() {
 #[test]
 fn test_query_can_show_test_callers_explicitly() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args([
-            "--repo",
-            dir.path().to_str().unwrap(),
-            "--include-tests",
-            "--include-test-callers",
-            "validate_body",
-        ])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(
+        dir.path(),
+        &["--include-tests", "--include-test-callers", "validate_body"],
+    );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -364,10 +348,7 @@ fn test_query_can_show_test_callers_explicitly() {
 #[test]
 fn test_query_shows_references_separately_from_callers() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["--repo", dir.path().to_str().unwrap(), "validate_body"])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["validate_body"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(output.status.success());
@@ -381,15 +362,7 @@ fn test_query_shows_references_separately_from_callers() {
 #[test]
 fn test_query_compact_inlines_context_sections() {
     let dir = create_query_test_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args([
-            "--repo",
-            dir.path().to_str().unwrap(),
-            "--compact",
-            "validating",
-        ])
-        .output()
-        .unwrap();
+    let output = run_tracegrep(dir.path(), &["--compact", "validating"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -432,10 +405,7 @@ fn test_query_rebuilds_stale_cache_after_head_changes() {
     run_git(&["add", "."]);
     run_git(&["commit", "-m", "initial"]);
 
-    let first = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["--repo", dir.path().to_str().unwrap(), "hello"])
-        .output()
-        .unwrap();
+    let first = run_tracegrep(dir.path(), &["hello"]);
     assert!(
         first.status.success(),
         "stderr: {}",
@@ -450,10 +420,7 @@ fn test_query_rebuilds_stale_cache_after_head_changes() {
     run_git(&["add", "."]);
     run_git(&["commit", "-m", "add caller"]);
 
-    let second = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["--repo", dir.path().to_str().unwrap(), "hello"])
-        .output()
-        .unwrap();
+    let second = run_tracegrep(dir.path(), &["hello"]);
     let stdout = String::from_utf8(second.stdout).unwrap();
     assert!(
         second.status.success(),
@@ -464,4 +431,152 @@ fn test_query_rebuilds_stale_cache_after_head_changes() {
         stdout.contains("Called via:") && stdout.contains("main"),
         "expected rebuilt cache to include new caller, got:\n{stdout}"
     );
+}
+
+#[test]
+fn test_query_supports_python_callers_and_references() {
+    let dir = create_repo(&[(
+        "app.py",
+        r#"def main():
+    router("POST")
+    register_handler(validate_body)
+
+def router(method):
+    if method == "POST":
+        validate_body()
+
+def validate_body():
+    print("validating")
+
+def register_handler(handler):
+    return handler
+"#,
+    )]);
+
+    let output = run_tracegrep(dir.path(), &["validate_body"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("app.py"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("router"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Referenced by:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("register_handler"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn test_query_supports_typescript_arrow_functions() {
+    let dir = create_repo(&[(
+        "ui.ts",
+        r#"export const render = () => {
+  helper();
+};
+
+function helper() {
+  console.log("ok");
+}
+"#,
+    )]);
+
+    let output = run_tracegrep(dir.path(), &["helper"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("ui.ts"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("render"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn test_query_supports_jsx_components_and_inline_handlers() {
+    let dir = create_repo(&[(
+        "Button.jsx",
+        r#"function submitForm() {
+  console.log("submit");
+}
+
+function Button() {
+  return <button onClick={() => submitForm()}>{label()}</button>;
+}
+
+function label() {
+  return "Save";
+}
+"#,
+    )]);
+
+    let output = run_tracegrep(dir.path(), &["submitForm"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("Button.jsx"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Button"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn test_query_does_not_cross_resolve_languages() {
+    let dir = create_repo(&[
+        (
+            "app.py",
+            r#"def shared():
+    return "py"
+"#,
+        ),
+        (
+            "app.ts",
+            r#"function shared() {
+  return "ts";
+}
+
+function render() {
+  shared();
+}
+"#,
+        ),
+    ]);
+
+    let output = run_tracegrep(dir.path(), &["--json", "def shared|function shared"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+
+    let mut saw_python = false;
+    let mut saw_typescript = false;
+    for line in stdout.lines() {
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        match parsed["file"].as_str() {
+            Some("app.py") => {
+                saw_python = true;
+                let callers = parsed["callers"].as_array().cloned().unwrap_or_default();
+                assert!(
+                    callers.is_empty(),
+                    "python callers should be empty: {parsed}"
+                );
+            }
+            Some("app.ts") => {
+                saw_typescript = true;
+                let callers = parsed["callers"].as_array().cloned().unwrap_or_default();
+                assert!(callers
+                    .iter()
+                    .any(|caller| caller["function"].as_str() == Some("render")));
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_python, "stdout:\n{stdout}");
+    assert!(saw_typescript, "stdout:\n{stdout}");
 }

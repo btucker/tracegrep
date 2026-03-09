@@ -20,13 +20,13 @@ tg --compact tool_data /path/to/repo
 # Include test callers when they matter
 tg --include-tests --include-test-callers tool_data /path/to/repo
 
-# Or keep using the older explicit form
-tracegrep --repo /path/to/repo tool_data
+# Search a subset of the repo with rg-style path arguments
+tg tool_data src tests
 ```
 
 ## Example output
 
-Searching for `validate_body` in a small Rust repo shows the difference in
+Searching for `validate_body` in a small repo shows the difference in
 shape immediately:
 
 <table>
@@ -66,15 +66,15 @@ tests/integration.rs:2:    validate_body();</code></pre>
 
 ## Notes
 
-- This is Rust-only today. The parser is built on `tree-sitter-rust`.
+- Supported source files: `.rs`, `.py`, `.js`, `.jsx`, `.ts`, and `.tsx`.
 - `rg` must be installed and available on `PATH`.
-- The preferred CLI shape mirrors `rg`: `tracegrep [flags] <pattern> [path]`.
-- `--repo` still works as an explicit compatibility flag and can be combined
-  with a positional path to search within a subdirectory of that repo.
+- The preferred CLI shape mirrors `rg`: `tracegrep [flags] <pattern> [path ...]`.
 - Most `rg` flags can be passed through before `<pattern>`, but tools that
   expect raw `rg` output should keep using `rg`.
-- The call graph is rebuilt automatically when the cache under `~/.cache/tracegrep/` is missing or its stored `HEAD` no longer matches the repo.
+- Each supported language is cached separately under `~/.cache/tracegrep/`, then merged in memory at query time.
+- The call graph is rebuilt automatically when the relevant per-language cache is missing or its stored `HEAD` no longer matches the repo.
 - Function references passed as arguments are shown separately from direct callers.
+- The current resolver is heuristic and language-local; it does not attempt import-aware or type-aware cross-file analysis.
 
 ## Claude Code plugin
 

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use tracegrep::analysis::codepaths::Language;
 use tracegrep::graph_cache::{
     graph_cache_path, load_or_build_graph, state_cache_path, LoadGraphMode,
 };
@@ -71,7 +72,7 @@ fn cache_reuses_on_docs_only_head_change_and_updates_state() {
     assert_eq!(result.outcome.mode, LoadGraphMode::Reused);
     assert!(result.outcome.changed_files.is_empty());
 
-    let state_path = state_cache_path(&repo_path, false).unwrap();
+    let state_path = state_cache_path(&repo_path, false, Language::Rust).unwrap();
     let state: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
     let expected_head = head(&repo_path);
@@ -177,12 +178,61 @@ fn corrupt_state_or_graph_falls_back_to_full_rebuild() {
     let (_dir, repo_path) = init_repo(&[("src/main.rs", "fn hello() {}\n")]);
 
     load_or_build_graph(&repo_path, false).unwrap();
-    std::fs::write(state_cache_path(&repo_path, false).unwrap(), "{not json").unwrap();
+    std::fs::write(
+        state_cache_path(&repo_path, false, Language::Rust).unwrap(),
+        "{not json",
+    )
+    .unwrap();
     let state_result = load_or_build_graph(&repo_path, false).unwrap();
     assert_eq!(state_result.outcome.mode, LoadGraphMode::FullRebuild);
 
     load_or_build_graph(&repo_path, false).unwrap();
-    std::fs::write(graph_cache_path(&repo_path, false).unwrap(), "{not json").unwrap();
+    std::fs::write(
+        graph_cache_path(&repo_path, false, Language::Rust).unwrap(),
+        "{not json",
+    )
+    .unwrap();
     let graph_result = load_or_build_graph(&repo_path, false).unwrap();
     assert_eq!(graph_result.outcome.mode, LoadGraphMode::FullRebuild);
+}
+
+#[test]
+fn cache_writes_separate_files_per_language() {
+    let (_dir, repo_path) = init_repo(&[
+        ("src/main.rs", "fn hello() {}\n"),
+        ("app.py", "def greet():\n    pass\n"),
+        ("ui.ts", "export function render() {}\n"),
+    ]);
+
+    let result = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(result.outcome.mode, LoadGraphMode::FullRebuild);
+
+    assert!(graph_cache_path(&repo_path, false, Language::Rust)
+        .unwrap()
+        .exists());
+    assert!(graph_cache_path(&repo_path, false, Language::Python)
+        .unwrap()
+        .exists());
+    assert!(graph_cache_path(&repo_path, false, Language::TypeScript)
+        .unwrap()
+        .exists());
+}
+
+#[test]
+fn cache_only_rebuilds_changed_language_files() {
+    let (_dir, repo_path) = init_repo(&[
+        ("src/main.rs", "fn hello() {}\n"),
+        ("app.py", "def greet():\n    pass\n"),
+    ]);
+
+    load_or_build_graph(&repo_path, false).unwrap();
+    std::fs::write(
+        repo_path.join("app.py"),
+        "def main():\n    greet()\n\ndef greet():\n    pass\n",
+    )
+    .unwrap();
+
+    let result = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(result.outcome.mode, LoadGraphMode::Incremental);
+    assert_eq!(result.outcome.changed_files, vec!["app.py"]);
 }

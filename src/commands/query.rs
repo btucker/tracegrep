@@ -93,7 +93,7 @@ pub struct QueryOptions<'a> {
     pub json_output: bool,
     pub compact: bool,
     pub repo: &'a str,
-    pub search_path: Option<&'a str>,
+    pub search_paths: &'a [String],
     pub depth: usize,
     pub include_tests: bool,
     pub include_test_callers: bool,
@@ -474,7 +474,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
         .arg("--json")
         .args(options.rg_args)
         .arg(options.pattern)
-        .args(options.search_path)
+        .args(options.search_paths)
         .current_dir(&repo_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -551,6 +551,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
             if let Some((node, callers, references)) = &func_info {
                 out["function"] = serde_json::json!(node.name);
                 out["qualified_name"] = serde_json::json!(node.qualified_name);
+                out["language"] = serde_json::to_value(node.language)?;
                 out["is_test"] = serde_json::json!(node.is_test);
                 out["callers"] = serde_json::to_value(if options.include_test_callers {
                     callers

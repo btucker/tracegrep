@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 
 use super::parsing::module_name_from_path;
-use super::types::{CallGraph, FileArtifact, FnCalls, FnDef, GraphEdge, GraphNode, GraphReference};
+use super::types::{
+    CallGraph, FileArtifact, FnCalls, FnDef, GraphEdge, GraphNode, GraphReference, Language,
+};
 
-pub(super) type NameIndex = HashMap<String, Vec<usize>>;
+pub(super) type NameIndex = HashMap<(Language, String), Vec<usize>>;
 
 #[derive(Debug, Clone)]
 pub(super) struct InternalEdge {
@@ -27,6 +29,7 @@ pub(super) fn flatten_file_artifacts(files: &[InternalFile]) -> (Vec<FnDef>, Vec
             fn_defs.push(FnDef {
                 name: function.name.clone(),
                 qualified_name: function.qualified_name.clone(),
+                language: function.language,
                 file: file.path.clone(),
                 is_test: function.is_test,
                 line: function.line,
@@ -63,7 +66,10 @@ pub(super) fn build_call_graph(
 ) -> HashMap<usize, Vec<InternalEdge>> {
     let mut name_idx: NameIndex = HashMap::new();
     for (i, def) in fn_defs.iter().enumerate() {
-        name_idx.entry(def.name.clone()).or_default().push(i);
+        name_idx
+            .entry((def.language, def.name.clone()))
+            .or_default()
+            .push(i);
     }
 
     let mut graph: HashMap<usize, Vec<InternalEdge>> = HashMap::new();
@@ -72,7 +78,12 @@ pub(super) fn build_call_graph(
         let mut edges: Vec<InternalEdge> = Vec::new();
 
         for site in &fc.call_sites {
-            let resolved = resolve_call(&site.callee_name, fn_defs, &name_idx);
+            let resolved = resolve_call(
+                &site.callee_name,
+                fn_defs,
+                &name_idx,
+                fn_defs[fc.caller_idx].language,
+            );
             for callee_idx in resolved {
                 if let Some(existing) = edges.iter_mut().find(|e| e.callee == callee_idx) {
                     if site.conditions.is_empty() || existing.conditions.is_empty() {
@@ -119,6 +130,7 @@ pub(super) fn build_serializable_graph(
             id: i,
             name: def.name.clone(),
             qualified_name: def.qualified_name.clone(),
+            language: def.language,
             file: def.file.clone(),
             is_test: def.is_test,
             line: def.line,
@@ -157,13 +169,21 @@ pub(super) fn build_serializable_graph(
 pub(super) fn build_references(fn_defs: &[FnDef], fn_calls: &[FnCalls]) -> Vec<GraphReference> {
     let mut name_idx: NameIndex = HashMap::new();
     for (i, def) in fn_defs.iter().enumerate() {
-        name_idx.entry(def.name.clone()).or_default().push(i);
+        name_idx
+            .entry((def.language, def.name.clone()))
+            .or_default()
+            .push(i);
     }
 
     let mut references = Vec::new();
     for fc in fn_calls {
         for site in &fc.reference_sites {
-            for target in resolve_symbol(&site.target_name, fn_defs, &name_idx) {
+            for target in resolve_symbol(
+                &site.target_name,
+                fn_defs,
+                &name_idx,
+                fn_defs[fc.caller_idx].language,
+            ) {
                 if target == fc.caller_idx {
                     continue;
                 }
@@ -187,11 +207,21 @@ pub(super) fn build_references(fn_defs: &[FnDef], fn_calls: &[FnCalls]) -> Vec<G
     references
 }
 
-pub(super) fn resolve_call(raw: &str, fn_defs: &[FnDef], name_idx: &NameIndex) -> Vec<usize> {
-    resolve_symbol(raw, fn_defs, name_idx)
+pub(super) fn resolve_call(
+    raw: &str,
+    fn_defs: &[FnDef],
+    name_idx: &NameIndex,
+    language: Language,
+) -> Vec<usize> {
+    resolve_symbol(raw, fn_defs, name_idx, language)
 }
 
-fn resolve_symbol(raw: &str, fn_defs: &[FnDef], name_idx: &NameIndex) -> Vec<usize> {
+fn resolve_symbol(
+    raw: &str,
+    fn_defs: &[FnDef],
+    name_idx: &NameIndex,
+    language: Language,
+) -> Vec<usize> {
     let simple_name: &str;
     let qualifier: Option<&str>;
 
@@ -206,7 +236,7 @@ fn resolve_symbol(raw: &str, fn_defs: &[FnDef], name_idx: &NameIndex) -> Vec<usi
         qualifier = None;
     }
 
-    let candidates = match name_idx.get(simple_name) {
+    let candidates = match name_idx.get(&(language, simple_name.to_string())) {
         Some(candidates) => candidates,
         None => return Vec::new(),
     };
@@ -220,7 +250,7 @@ fn resolve_symbol(raw: &str, fn_defs: &[FnDef], name_idx: &NameIndex) -> Vec<usi
                 if def.qualified_name.starts_with(&format!("{qualifier}::")) {
                     return true;
                 }
-                module_name_from_path(&def.file) == qualifier
+                module_name_from_path(&def.file, def.language) == qualifier
             })
             .collect();
 
@@ -232,4 +262,41 @@ fn resolve_symbol(raw: &str, fn_defs: &[FnDef], name_idx: &NameIndex) -> Vec<usi
     }
 
     candidates.clone()
+}
+
+pub fn merge_graphs(graphs: &[CallGraph]) -> CallGraph {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut references = Vec::new();
+
+    for graph in graphs {
+        let node_offset = nodes.len();
+        nodes.extend(graph.nodes.iter().enumerate().map(|(idx, node)| GraphNode {
+            id: node_offset + idx,
+            name: node.name.clone(),
+            qualified_name: node.qualified_name.clone(),
+            language: node.language,
+            file: node.file.clone(),
+            is_test: node.is_test,
+            line: node.line,
+            end_line: node.end_line,
+        }));
+        edges.extend(graph.edges.iter().map(|edge| GraphEdge {
+            caller: node_offset + edge.caller,
+            callee: node_offset + edge.callee,
+            conditions: edge.conditions.clone(),
+        }));
+        references.extend(graph.references.iter().map(|reference| GraphReference {
+            referencer: node_offset + reference.referencer,
+            target: node_offset + reference.target,
+            kind: reference.kind.clone(),
+            context: reference.context.clone(),
+        }));
+    }
+
+    CallGraph {
+        nodes,
+        edges,
+        references,
+    }
 }
