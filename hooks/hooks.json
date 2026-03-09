@@ -14,7 +14,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Grep",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
@@ -22,13 +22,15 @@
             "async": false
           }
         ]
-      },
+      }
+    ],
+    "PostToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Grep",
         "hooks": [
           {
             "type": "command",
-            "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' pre-tool-use",
+            "command": "'${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd' post-tool-use",
             "async": false
           }
         ]

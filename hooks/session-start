@@ -18,7 +18,7 @@ escape_for_json() {
 }
 
 SKILL_ESCAPED="$(escape_for_json "${SKILL_CONTENT}")"
-SESSION_CONTEXT="<IMPORTANT>\nThis repository ships a tracegrep plugin.\n\nUse \`tg\` as your default repository search tool here instead of Claude Code's built-in Grep tool or Bash \`rg\`/\`grep\` commands.\n\nBelow is the full content of the \`search-with-call-graph-context\` skill:\n\n${SKILL_ESCAPED}\n</IMPORTANT>"
+SESSION_CONTEXT="<IMPORTANT>\nThis repository ships a tracegrep plugin.\n\nUse Claude Code's built-in Grep tool for repository search when appropriate. In this repo, Grep results may be followed by tracegrep call-graph annotations from a PostToolUse hook. Avoid raw Bash \`rg\`/\`grep\` commands when \`tg\` or Grep can answer the question.\n\nBelow is the full content of the \`search-with-call-graph-context\` skill:\n\n${SKILL_ESCAPED}\n</IMPORTANT>"
 
 cat <<EOF
 {

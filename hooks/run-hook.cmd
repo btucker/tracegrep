@@ -12,6 +12,9 @@ case "${HOOK_NAME}" in
     pre-tool-use)
         exec python3 "${SCRIPT_DIR}/pre-tool-use.py"
         ;;
+    post-tool-use)
+        exec python3 "${SCRIPT_DIR}/post-tool-use.py"
+        ;;
     *)
         echo "unknown hook: ${HOOK_NAME}" >&2
         exit 1

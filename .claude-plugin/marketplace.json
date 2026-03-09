@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "tracegrep",
-      "description": "Claude Code skill and hooks that steer repository search from Grep and rg to tg",
+      "description": "Claude Code skill and hooks that augment Grep with tg annotations and steer shell rg to tg",
       "version": "0.1.0",
       "source": "./",
       "author": {

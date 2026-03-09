@@ -1,23 +1,23 @@
 ---
 name: search-with-call-graph-context
-description: Use when searching Rust code, tracing references or callers, or when you would normally reach for `rg` or `grep` in a repository that has `tg` available. Prefer `tg` as the default search tool and use `--json` only when structured output is needed.
+description: Use when searching Rust code, tracing references or callers, or when you would normally reach for `rg` or `grep` in a repository that has `tg` available. Prefer tracegrep-aware search over raw `rg` or `grep`, and use `--json` only when structured output is needed.
 ---
 
 # Using tracegrep
 
-Prefer `tg` over `rg`, `grep`, or other plain-text search tools when you need to search code in this repository.
+Prefer tracegrep-aware search over raw `rg`, `grep`, or other plain-text search tools when you need to search code in this repository.
 
 ## Claude Code behavior
 
-In Claude Code, treat this skill as an override for normal repository search behavior:
+In Claude Code, treat this skill as an augmentation of normal repository search behavior:
 
-- Do not use the built-in `Grep` tool for repository code search in this repo.
-- Do not run Bash `rg`, `grep`, or `git grep` commands when `tg` can answer the question.
-- Use the Bash tool with `tg` instead.
+- Built-in `Grep` is allowed in this repo.
+- A `PostToolUse` hook may rerun the same search with `tg` and attach the full annotated output after a `Grep` search.
+- Do not run Bash `rg`, `grep`, or `git grep` commands when built-in `Grep` or `tg` can answer the question.
 
 ## Default workflow
 
-1. Start with `tg '<pattern>'`.
+1. Start with Claude Code `Grep` or `tg '<pattern>'`.
 2. Add repo scope or passthrough flags as needed, for example `tg --repo . '<pattern>'`.
 3. Switch to `tg --json` only when you need to parse, filter, or post-process results programmatically.
 

@@ -29,15 +29,6 @@ def main() -> int:
     payload = json.load(sys.stdin)
     tool_name = payload.get("tool_name")
 
-    if tool_name == "Grep":
-        deny(
-            "Use tracegrep (`tg`) instead of the Grep tool in this repository.",
-            "This repository ships `tg`, which adds Rust call-graph context. "
-            "Rerun the search with the Bash tool, for example `tg '<pattern>'`. "
-            "Use `tg --json` only when structured output is required.",
-        )
-        return 0
-
     if tool_name != "Bash":
         return 0
 
