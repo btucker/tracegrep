@@ -252,10 +252,10 @@ fn should_skip_nested_scope(node: tree_sitter::Node) -> bool {
 }
 
 fn is_named_value_function(node: tree_sitter::Node) -> bool {
-    match node.parent().map(|parent| parent.kind()) {
-        Some("variable_declarator") | Some("pair") => true,
-        _ => false,
-    }
+    matches!(
+        node.parent().map(|parent| parent.kind()),
+        Some("variable_declarator") | Some("pair")
+    )
 }
 
 fn collect_argument_references(
