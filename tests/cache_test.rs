@@ -1,0 +1,188 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use tracegrep::graph_cache::{
+    graph_cache_path, load_or_build_graph, state_cache_path, LoadGraphMode,
+};
+
+fn git(repo: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@test.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@test.com")
+        .output()
+        .unwrap()
+}
+
+fn init_repo(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, contents) in files {
+        let full_path = dir.path().join(path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(full_path, contents).unwrap();
+    }
+
+    git(dir.path(), &["init"]);
+    git(dir.path(), &["config", "user.email", "test@test.com"]);
+    git(dir.path(), &["config", "user.name", "Test"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-m", "initial"]);
+
+    let repo_path = dir.path().canonicalize().unwrap();
+    (dir, repo_path)
+}
+
+fn head(repo: &Path) -> String {
+    let output = git(repo, &["rev-parse", "HEAD"]);
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn cache_reuses_same_head_when_clean() {
+    let (_dir, repo_path) = init_repo(&[("src/main.rs", "fn hello() {}\n")]);
+
+    let first = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(first.outcome.mode, LoadGraphMode::FullRebuild);
+
+    let second = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(second.outcome.mode, LoadGraphMode::Reused);
+    assert!(second.outcome.changed_files.is_empty());
+}
+
+#[test]
+fn cache_reuses_on_docs_only_head_change_and_updates_state() {
+    let (_dir, repo_path) = init_repo(&[
+        ("src/main.rs", "fn hello() {}\n"),
+        ("README.md", "initial\n"),
+    ]);
+
+    load_or_build_graph(&repo_path, false).unwrap();
+    std::fs::write(repo_path.join("README.md"), "updated\n").unwrap();
+    git(&repo_path, &["add", "README.md"]);
+    git(&repo_path, &["commit", "-m", "docs"]);
+
+    let result = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(result.outcome.mode, LoadGraphMode::Reused);
+    assert!(result.outcome.changed_files.is_empty());
+
+    let state_path = state_cache_path(&repo_path, false).unwrap();
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
+    let expected_head = head(&repo_path);
+    assert_eq!(state["head"].as_str(), Some(expected_head.as_str()));
+}
+
+#[test]
+fn cache_incrementally_updates_modified_tracked_production_file() {
+    let (_dir, repo_path) = init_repo(&[("src/main.rs", "fn hello() {}\n")]);
+
+    load_or_build_graph(&repo_path, false).unwrap();
+    std::fs::write(
+        repo_path.join("src/main.rs"),
+        "fn main() { hello(); }\nfn hello() {}\n",
+    )
+    .unwrap();
+
+    let result = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(result.outcome.mode, LoadGraphMode::Incremental);
+    assert_eq!(result.outcome.changed_files, vec!["src/main.rs"]);
+}
+
+#[test]
+fn cache_incrementally_updates_untracked_production_file() {
+    let (_dir, repo_path) = init_repo(&[("src/main.rs", "fn hello() {}\n")]);
+
+    load_or_build_graph(&repo_path, false).unwrap();
+    std::fs::write(repo_path.join("src/extra.rs"), "fn helper() {}\n").unwrap();
+
+    let result = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(result.outcome.mode, LoadGraphMode::Incremental);
+    assert_eq!(result.outcome.changed_files, vec!["src/extra.rs"]);
+}
+
+#[test]
+fn cache_incrementally_updates_deleted_production_file() {
+    let (_dir, repo_path) = init_repo(&[
+        (
+            "src/main.rs",
+            "mod helper;\nfn main() { helper::hello(); }\n",
+        ),
+        ("src/helper.rs", "pub fn hello() {}\n"),
+    ]);
+
+    load_or_build_graph(&repo_path, false).unwrap();
+    std::fs::remove_file(repo_path.join("src/helper.rs")).unwrap();
+    std::fs::write(repo_path.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let result = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(result.outcome.mode, LoadGraphMode::Incremental);
+    assert!(result
+        .outcome
+        .changed_files
+        .contains(&"src/helper.rs".to_string()));
+}
+
+#[test]
+fn production_cache_ignores_test_only_changes() {
+    let (_dir, repo_path) = init_repo(&[
+        ("src/main.rs", "fn hello() {}\n"),
+        (
+            "tests/integration.rs",
+            "#[test]\nfn it_works() { hello(); }\n",
+        ),
+    ]);
+
+    load_or_build_graph(&repo_path, false).unwrap();
+    std::fs::write(
+        repo_path.join("tests/integration.rs"),
+        "#[test]\nfn it_works() { assert!(true); }\n",
+    )
+    .unwrap();
+
+    let result = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(result.outcome.mode, LoadGraphMode::Reused);
+    assert!(result.outcome.changed_files.is_empty());
+}
+
+#[test]
+fn include_tests_cache_tracks_test_file_changes() {
+    let (_dir, repo_path) = init_repo(&[
+        ("src/main.rs", "fn hello() {}\n"),
+        (
+            "tests/integration.rs",
+            "#[test]\nfn it_works() { hello(); }\n",
+        ),
+    ]);
+
+    load_or_build_graph(&repo_path, true).unwrap();
+    std::fs::write(
+        repo_path.join("tests/integration.rs"),
+        "#[test]\nfn it_works() { assert!(true); }\n",
+    )
+    .unwrap();
+
+    let result = load_or_build_graph(&repo_path, true).unwrap();
+    assert_eq!(result.outcome.mode, LoadGraphMode::Incremental);
+    assert_eq!(result.outcome.changed_files, vec!["tests/integration.rs"]);
+}
+
+#[test]
+fn corrupt_state_or_graph_falls_back_to_full_rebuild() {
+    let (_dir, repo_path) = init_repo(&[("src/main.rs", "fn hello() {}\n")]);
+
+    load_or_build_graph(&repo_path, false).unwrap();
+    std::fs::write(state_cache_path(&repo_path, false).unwrap(), "{not json").unwrap();
+    let state_result = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(state_result.outcome.mode, LoadGraphMode::FullRebuild);
+
+    load_or_build_graph(&repo_path, false).unwrap();
+    std::fs::write(graph_cache_path(&repo_path, false).unwrap(), "{not json").unwrap();
+    let graph_result = load_or_build_graph(&repo_path, false).unwrap();
+    assert_eq!(graph_result.outcome.mode, LoadGraphMode::FullRebuild);
+}

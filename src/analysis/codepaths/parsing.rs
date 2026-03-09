@@ -2,39 +2,37 @@ use std::path::Path;
 
 use crate::analysis::is_test_file;
 
-use super::types::{CallSite, FnCalls, FnDef, GraphReferenceKind, ReferenceSite};
+use super::types::{CallSite, FileArtifact, FunctionArtifact, GraphReferenceKind, ReferenceSite};
 
 struct ParseContext<'a> {
-    file: &'a str,
     module_name: &'a str,
     file_is_test: bool,
     include_tests: bool,
 }
 
-pub(super) fn extract_from_source(
+pub(crate) fn extract_from_source(
     source: &str,
     relative_path: &str,
     include_tests: bool,
     parser: &mut tree_sitter::Parser,
-    fn_defs: &mut Vec<FnDef>,
-    fn_calls: &mut Vec<FnCalls>,
-) {
-    let tree = match parser.parse(source, None) {
-        Some(tree) => tree,
-        None => return,
-    };
+) -> Option<FileArtifact> {
+    let tree = parser.parse(source, None)?;
 
     let root = tree.root_node();
     let src = source.as_bytes();
     let module_name = module_name_from_path(relative_path);
     let ctx = ParseContext {
-        file: relative_path,
         module_name: &module_name,
         file_is_test: is_test_file(relative_path),
         include_tests,
     };
 
-    collect_functions(root, src, &ctx, false, fn_defs, fn_calls);
+    let mut functions = Vec::new();
+    collect_functions(root, src, &ctx, false, &mut functions);
+    Some(FileArtifact {
+        source_hash: String::new(),
+        functions,
+    })
 }
 
 pub(super) fn module_name_from_path(path: &str) -> String {
@@ -55,8 +53,7 @@ fn collect_functions(
     src: &[u8],
     ctx: &ParseContext<'_>,
     in_test_context: bool,
-    fn_defs: &mut Vec<FnDef>,
-    fn_calls: &mut Vec<FnCalls>,
+    functions: &mut Vec<FunctionArtifact>,
 ) {
     let is_cfg_test_module = node.kind() == "mod_item" && has_cfg_test_attr(node, src);
     if !ctx.include_tests && is_cfg_test_module {
@@ -81,24 +78,18 @@ fn collect_functions(
                 format!("{}::{name}", ctx.module_name)
             };
 
-            let idx = fn_defs.len();
-            fn_defs.push(FnDef {
-                name,
-                qualified_name,
-                file: ctx.file.to_string(),
-                is_test,
-                line,
-                end_line,
-            });
-
             let mut call_sites = Vec::new();
             let mut reference_sites = Vec::new();
             if let Some(body) = node.child_by_field_name("body") {
                 collect_calls(body, src, &mut call_sites, &mut reference_sites);
             }
 
-            fn_calls.push(FnCalls {
-                caller_idx: idx,
+            functions.push(FunctionArtifact {
+                name,
+                qualified_name,
+                is_test,
+                line,
+                end_line,
                 call_sites,
                 reference_sites,
             });
@@ -107,7 +98,7 @@ fn collect_functions(
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            collect_functions(child, src, ctx, in_test_context, fn_defs, fn_calls);
+            collect_functions(child, src, ctx, in_test_context, functions);
         }
     }
 }

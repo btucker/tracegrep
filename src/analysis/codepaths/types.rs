@@ -63,20 +63,41 @@ pub struct CodePathsResult {
     pub fn_defs: Vec<FnDef>,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct CallSite {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CallSite {
     pub callee_name: String,
+    #[serde(default)]
     pub conditions: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct ReferenceSite {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReferenceSite {
     pub target_name: String,
     pub kind: GraphReferenceKind,
     pub context: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FunctionArtifact {
+    pub name: String,
+    pub qualified_name: String,
+    pub is_test: bool,
+    pub line: usize,
+    pub end_line: usize,
+    #[serde(default)]
+    pub call_sites: Vec<CallSite>,
+    #[serde(default)]
+    pub reference_sites: Vec<ReferenceSite>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileArtifact {
+    pub source_hash: String,
+    #[serde(default)]
+    pub functions: Vec<FunctionArtifact>,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct FnCalls {
     pub caller_idx: usize,
     pub call_sites: Vec<CallSite>,

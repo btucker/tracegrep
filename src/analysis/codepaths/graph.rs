@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::parsing::module_name_from_path;
-use super::types::{CallGraph, FnCalls, FnDef, GraphEdge, GraphNode, GraphReference};
+use super::types::{CallGraph, FileArtifact, FnCalls, FnDef, GraphEdge, GraphNode, GraphReference};
 
 pub(super) type NameIndex = HashMap<String, Vec<usize>>;
 
@@ -9,6 +9,52 @@ pub(super) type NameIndex = HashMap<String, Vec<usize>>;
 pub(super) struct InternalEdge {
     pub callee: usize,
     pub conditions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct InternalFile {
+    pub path: String,
+    pub artifact: FileArtifact,
+}
+
+pub(super) fn flatten_file_artifacts(files: &[InternalFile]) -> (Vec<FnDef>, Vec<FnCalls>) {
+    let mut fn_defs = Vec::new();
+    let mut fn_calls = Vec::new();
+
+    for file in files {
+        for function in &file.artifact.functions {
+            let idx = fn_defs.len();
+            fn_defs.push(FnDef {
+                name: function.name.clone(),
+                qualified_name: function.qualified_name.clone(),
+                file: file.path.clone(),
+                is_test: function.is_test,
+                line: function.line,
+                end_line: function.end_line,
+            });
+            fn_calls.push(FnCalls {
+                caller_idx: idx,
+                call_sites: function.call_sites.clone(),
+                reference_sites: function.reference_sites.clone(),
+            });
+        }
+    }
+
+    (fn_defs, fn_calls)
+}
+
+pub fn build_graph_from_artifacts(files: &BTreeMap<String, FileArtifact>) -> CallGraph {
+    let files: Vec<InternalFile> = files
+        .iter()
+        .map(|(path, artifact)| InternalFile {
+            path: path.clone(),
+            artifact: artifact.clone(),
+        })
+        .collect();
+    let (fn_defs, fn_calls) = flatten_file_artifacts(&files);
+    let graph = build_call_graph(&fn_defs, &fn_calls);
+    let references = build_references(&fn_defs, &fn_calls);
+    build_serializable_graph(&fn_defs, &graph, &references)
 }
 
 pub(super) fn build_call_graph(

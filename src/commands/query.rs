@@ -345,7 +345,7 @@ fn split_references(references: Vec<ReferenceInfo>) -> ReferenceSplit {
 }
 
 fn load_graph(repo_path: &Path, include_tests: bool) -> anyhow::Result<LoadedGraph> {
-    let graph = load_or_build_graph(repo_path, include_tests)?;
+    let graph = load_or_build_graph(repo_path, include_tests)?.graph;
 
     let mut backward_calls = vec![vec![]; graph.nodes.len()];
     for (i, edge) in graph.edges.iter().enumerate() {
