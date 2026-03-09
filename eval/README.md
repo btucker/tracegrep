@@ -1,6 +1,10 @@
 # Eval Harness
 
-This directory contains a small benchmark harness for comparing `codex` and `claude` CLI runs with and without `tg`.
+This directory contains a small benchmark harness for comparing `codex` and `claude` CLI runs with and without agent access to `tg`.
+
+The claim this harness is built to test is:
+
+- does having the agent use `tg` make a difference in the code it produces?
 
 ## What it does
 
@@ -8,6 +12,7 @@ This directory contains a small benchmark harness for comparing `codex` and `cla
 - clones the upstream repo into `eval/workspaces/cache/`
 - creates detached pre-fix git worktrees for `control` and `tg` runs
 - writes redacted task prompts that hide the accepted PR
+- injects tracegrep agent integration only into the `tg` condition
 - generates launcher scripts for both `codex` and `claude`
 
 ## Usage
@@ -59,9 +64,17 @@ Preparing a task creates:
 - `eval/workspaces/runs/<task>/launch_<agent>_<condition>.sh` launcher script
 - `eval/workspaces/runs/<task>/hidden/ground_truth.json` accepted PR metadata for evaluation
 
+For the `tg` worktree only, `prepare` also creates:
+
+- `.codex/skills/tracegrep/` copied from this repo's `skills/tracegrep/`
+- `.claude/settings.local.json` enabling the `tracegrep@tracegrep-dev` plugin marketplace entry
+- the generated Claude `tg` launcher checks `claude plugin list --json` and fails fast if `tracegrep@tracegrep-dev` is not installed
+
 ## Notes
 
 - The prompts tell agents not to browse the web or inspect PR history.
 - The `control` prompt explicitly forbids `tg`.
 - The `tg` prompt explicitly prefers `tg`/`tracegrep` for supported source files.
+- The benchmark is about agent use of `tg`, so the `tg` condition includes the agent-specific skill/plugin wiring needed to expose it naturally.
+- The `control` worktree does not get the Codex skill or Claude plugin config.
 - For tasks where the original issue contained solution leakage, the manifest uses a redacted benchmark prompt instead.

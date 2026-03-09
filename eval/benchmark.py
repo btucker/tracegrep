@@ -22,6 +22,7 @@ TASKS_PATH = SCRIPT_DIR / "tasks.json"
 DEFAULT_ROOT = SCRIPT_DIR / "workspaces"
 SUPPORTED_AGENTS = ("codex", "claude")
 SUPPORTED_CONDITIONS = ("control", "tg")
+TRACEGREP_SKILL_SOURCE = SCRIPT_DIR.parent / "skills" / "tracegrep"
 
 
 def load_tasks() -> dict[str, dict[str, Any]]:
@@ -113,6 +114,52 @@ def ensure_worktree(
     return path
 
 
+def remove_tree(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def write_claude_settings(path: Path) -> None:
+    settings = {
+        "$schema": "https://json.schemastore.org/claude-code-settings.json",
+        "enabledPlugins": {
+            "tracegrep@tracegrep-dev": True,
+        },
+        "extraKnownMarketplaces": {
+            "tracegrep-dev": {
+                "source": {
+                    "source": "github",
+                    "repo": "btucker/tracegrep",
+                    "ref": "main",
+                }
+            }
+        },
+    }
+    write_json(path, settings)
+
+
+def configure_condition_environment(worktree: Path, condition: str) -> None:
+    codex_skill_dir = worktree / ".codex" / "skills" / "tracegrep"
+    claude_settings_path = worktree / ".claude" / "settings.local.json"
+
+    if condition == "tg":
+        if not TRACEGREP_SKILL_SOURCE.exists():
+            raise SystemExit(f"tracegrep skill source not found at {TRACEGREP_SKILL_SOURCE}")
+        remove_tree(codex_skill_dir)
+        codex_skill_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(TRACEGREP_SKILL_SOURCE, codex_skill_dir)
+        claude_settings_path.parent.mkdir(parents=True, exist_ok=True)
+        write_claude_settings(claude_settings_path)
+        return
+
+    remove_tree(codex_skill_dir)
+    if claude_settings_path.exists():
+        claude_settings_path.unlink()
+
+
 def condition_search_guidance(condition: str) -> str:
     if condition == "tg":
         return (
@@ -176,6 +223,10 @@ def build_run_readme(task: dict[str, Any], root: Path) -> str:
             "Worktrees:",
             f"- {worktree_dir(root, task['id'], 'control')}",
             f"- {worktree_dir(root, task['id'], 'tg')}",
+            "",
+            "tg condition environment additions:",
+            "- `.codex/skills/tracegrep/` copied from this repo",
+            "- `.claude/settings.local.json` enabling `tracegrep@tracegrep-dev`",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -194,6 +245,28 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
         command = 'exec claude "$@" "$(cat "$PROMPT_FILE")"'
     else:
         raise ValueError(f"unsupported agent: {agent}")
+    preflight = ""
+    if agent == "claude" and condition == "tg":
+        preflight = textwrap.dedent(
+            """\
+            PLUGIN_ID="tracegrep@tracegrep-dev"
+            if ! claude plugin list --json | python3 -c '
+            import json
+            import sys
+
+            plugin_id = sys.argv[1]
+            plugins = json.load(sys.stdin)
+            installed = any(plugin.get("id") == plugin_id for plugin in plugins)
+            sys.exit(0 if installed else 1)
+            ' "$PLUGIN_ID"; then
+              echo "Required Claude plugin not installed: $PLUGIN_ID" >&2
+              echo "Run this once from the worktree to install it:" >&2
+              echo "  claude plugin install $PLUGIN_ID" >&2
+              exit 1
+            fi
+
+            """
+        )
     return textwrap.dedent(
         f"""\
         #!/usr/bin/env bash
@@ -204,6 +277,7 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
         PROMPT_FILE="{prompt_file}"
 
         cd "$WORKTREE"
+        {preflight}\
         {command}
         """
     )
@@ -221,7 +295,8 @@ def prepare_task(root: Path, task: dict[str, Any], *, force: bool) -> None:
     (base / "hidden").mkdir(parents=True, exist_ok=True)
 
     for condition in SUPPORTED_CONDITIONS:
-        ensure_worktree(root, task, condition, force=force)
+        worktree = ensure_worktree(root, task, condition, force=force)
+        configure_condition_environment(worktree, condition)
         prompt = build_prompt(task, condition)
         prompt_path(root, task["id"], condition).write_text(prompt)
 
@@ -293,7 +368,7 @@ def cmd_launch(
     script = launch_script_path(root, task_id, agent, condition)
     if not script.exists():
         raise SystemExit(
-            f"{script} does not exist. Run `python3 eval/benchmark.py prepare {task_id}` first."
+            f"{script} does not exist. Run `uv run eval/benchmark.py prepare {task_id}` first."
         )
     command = [str(script), *extra_args]
     print("launching:", " ".join(shlex.quote(part) for part in command))
