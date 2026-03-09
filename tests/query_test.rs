@@ -218,6 +218,50 @@ fn test_query_passes_rg_flags() {
 }
 
 #[test]
+fn test_query_accepts_rg_style_positional_path() {
+    let dir = create_query_test_repo();
+    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
+        .args(["validate_body", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("validate_body"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn test_query_scopes_search_with_repo_override_and_positional_path() {
+    let dir = create_query_test_repo();
+    let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "validate_body",
+            "src",
+        ])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("src/main.rs"), "stdout:\n{stdout}");
+    assert!(
+        !stdout.contains("tests/integration.rs"),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
 fn test_query_uses_rg_style_colors_when_forced() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))

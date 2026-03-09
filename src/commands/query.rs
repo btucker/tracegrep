@@ -93,6 +93,7 @@ pub struct QueryOptions<'a> {
     pub json_output: bool,
     pub compact: bool,
     pub repo: &'a str,
+    pub search_path: Option<&'a str>,
     pub depth: usize,
     pub include_tests: bool,
     pub include_test_callers: bool,
@@ -471,8 +472,9 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
     let mut rg_cmd = Command::new("rg");
     rg_cmd
         .arg("--json")
-        .arg(options.pattern)
         .args(options.rg_args)
+        .arg(options.pattern)
+        .args(options.search_path)
         .current_dir(&repo_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
