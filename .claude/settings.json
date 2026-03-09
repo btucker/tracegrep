@@ -5,7 +5,7 @@
       "source": {
         "source": "github",
         "repo": "btucker/tracegrep",
-        "ref": "codex/tracegrep-skill-plugin"
+        "ref": "main"
       }
     }
   },

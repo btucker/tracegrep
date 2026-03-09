@@ -29,6 +29,7 @@ pub fn new_parser(language: Language) -> Result<tree_sitter::Parser> {
         Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         Language::Python => tree_sitter_python::LANGUAGE.into(),
         Language::JavaScript | Language::Jsx => tree_sitter_javascript::LANGUAGE.into(),
+        Language::Svelte => tree_sitter_svelte_next::LANGUAGE.into(),
         Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
     };
@@ -48,6 +49,7 @@ pub fn language_for_path(path: &Path) -> Option<Language> {
         "py" => Some(Language::Python),
         "js" => Some(Language::JavaScript),
         "jsx" => Some(Language::Jsx),
+        "svelte" => Some(Language::Svelte),
         "ts" => Some(Language::TypeScript),
         "tsx" => Some(Language::Tsx),
         _ => None,

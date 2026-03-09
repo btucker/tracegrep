@@ -7,16 +7,18 @@ pub enum Language {
     Python,
     JavaScript,
     Jsx,
+    Svelte,
     TypeScript,
     Tsx,
 }
 
 impl Language {
-    pub const ALL: [Language; 6] = [
+    pub const ALL: [Language; 7] = [
         Language::Rust,
         Language::Python,
         Language::JavaScript,
         Language::Jsx,
+        Language::Svelte,
         Language::TypeScript,
         Language::Tsx,
     ];
@@ -27,6 +29,7 @@ impl Language {
             Self::Python => "python",
             Self::JavaScript => "javascript",
             Self::Jsx => "jsx",
+            Self::Svelte => "svelte",
             Self::TypeScript => "typescript",
             Self::Tsx => "tsx",
         }
@@ -38,6 +41,7 @@ impl Language {
             Self::Python => "Python",
             Self::JavaScript => "JavaScript",
             Self::Jsx => "JSX",
+            Self::Svelte => "Svelte",
             Self::TypeScript => "TypeScript",
             Self::Tsx => "TSX",
         }

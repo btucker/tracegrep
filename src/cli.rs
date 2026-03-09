@@ -117,7 +117,7 @@ impl Cli {
             "tracegrep {}\n\n\
 Search code with ripgrep and language-aware call graph context.\n\n\
 Usage:\n  tracegrep [flags/rg flags] <pattern> [path ...]\n\n\
-Supported files: .rs, .py, .js, .jsx, .ts, .tsx\n\n\
+Supported files: .rs, .py, .js, .jsx, .svelte, .ts, .tsx\n\n\
 Tracegrep flags:\n  --json                  Output enriched results as JSON\n  --compact               Collapse human-readable context onto the location line\n  --depth <N>             How many caller levels to show (default: 1)\n  --include-tests         Include test-file callers and references in the graph\n  --include-test-callers  Show callers that originate from test code\n  -h, --help              Print help\n  -V, --version           Print version\n\n\
 Any unrecognized flags before <pattern> are forwarded to rg.\n\
 Positional [path ...] arguments use rg semantics.\n",

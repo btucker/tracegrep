@@ -201,6 +201,10 @@ fn cache_writes_separate_files_per_language() {
     let (_dir, repo_path) = init_repo(&[
         ("src/main.rs", "fn hello() {}\n"),
         ("app.py", "def greet():\n    pass\n"),
+        (
+            "Component.svelte",
+            "<script>function render() {}</script>\n",
+        ),
         ("ui.ts", "export function render() {}\n"),
     ]);
 
@@ -211,6 +215,9 @@ fn cache_writes_separate_files_per_language() {
         .unwrap()
         .exists());
     assert!(graph_cache_path(&repo_path, false, Language::Python)
+        .unwrap()
+        .exists());
+    assert!(graph_cache_path(&repo_path, false, Language::Svelte)
         .unwrap()
         .exists());
     assert!(graph_cache_path(&repo_path, false, Language::TypeScript)

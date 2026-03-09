@@ -524,6 +524,34 @@ function label() {
 }
 
 #[test]
+fn test_query_supports_svelte_template_calls() {
+    let dir = create_repo(&[(
+        "Button.svelte",
+        r#"<script>
+  function submitForm() {
+    console.log("submit");
+  }
+</script>
+
+<button on:click={() => submitForm()}>
+  Save
+</button>
+"#,
+    )]);
+
+    let output = run_tracegrep(dir.path(), &["submitForm"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(stdout.contains("Button.svelte"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("template"), "stdout:\n{stdout}");
+}
+
+#[test]
 fn test_query_does_not_cross_resolve_languages() {
     let dir = create_repo(&[
         (

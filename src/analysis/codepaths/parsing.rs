@@ -1,6 +1,7 @@
 mod javascript;
 mod python;
 mod rust;
+mod svelte;
 
 use std::path::Path;
 
@@ -29,6 +30,7 @@ pub(crate) fn extract_from_source(
     match language {
         Language::Rust => rust::extract(root, src, &ctx),
         Language::Python => python::extract(root, src, &ctx),
+        Language::Svelte => svelte::extract(root, src, &ctx),
         Language::JavaScript | Language::Jsx | Language::TypeScript | Language::Tsx => {
             javascript::extract(root, src, &ctx)
         }
@@ -65,6 +67,7 @@ pub(super) fn module_name_from_path(path: &str, language: Language) -> String {
     let use_parent = match language {
         Language::Rust => stem == "mod" || stem == "lib" || stem == "main",
         Language::Python => stem == "__init__",
+        Language::Svelte => false,
         Language::JavaScript | Language::Jsx | Language::TypeScript | Language::Tsx => {
             stem == "index"
         }
