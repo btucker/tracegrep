@@ -1,0 +1,13 @@
+{
+  "name": "tracegrep",
+  "description": "Claude Code skill that prefers tg over rg for Rust-aware code search and inspection",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ben Tucker",
+    "email": "ben@btucker.net"
+  },
+  "homepage": "https://github.com/btucker/tracegrep",
+  "repository": "https://github.com/btucker/tracegrep",
+  "license": "MIT",
+  "keywords": ["skills", "search", "tracegrep", "rust", "code-search"]
+}
