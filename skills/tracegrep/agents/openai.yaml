@@ -1,7 +1,7 @@
 interface:
   display_name: "Grep with tracegrep"
-  short_description: "Search Rust code with call-graph context"
-  default_prompt: "Use $tracegrep to search this Rust repo with tracegrep call-graph context."
+  short_description: "Search supported source code with call-graph context"
+  default_prompt: "Use $tracegrep to search this repo with tracegrep call-graph context for supported files (.rs, .py, .js, .jsx, .svelte, .ts, .tsx)."
 
 policy:
   allow_implicit_invocation: true

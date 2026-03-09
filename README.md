@@ -4,7 +4,7 @@
 
 It exists to give coding agent instant context for how a line of code is used in the codebase. This allows the coding agent to gain a more complete understanding prior to making changes.
 
-This repo also includes a Claude Code plugin, hooks, and skill that add tracegrep call-graph context to Claude's normal search flow.
+This repo also includes a Claude Code plugin and skill that add tracegrep call-graph context to Claude's normal search flow.
 
 ## Usage
 
@@ -66,7 +66,7 @@ tests/integration.rs:2:    validate_body();</code></pre>
 
 ## Notes
 
-- Supported source files: `.rs`, `.py`, `.js`, `.jsx`, `.ts`, and `.tsx`.
+- Supported source files: `.rs`, `.py`, `.js`, `.jsx`, `.svelte`, `.ts`, and `.tsx`.
 - `rg` must be installed and available on `PATH`.
 - The preferred CLI shape mirrors `rg`: `tracegrep [flags] <pattern> [path ...]`.
 - Most `rg` flags can be passed through before `<pattern>`, but tools that
@@ -78,7 +78,7 @@ tests/integration.rs:2:    validate_body();</code></pre>
 
 ## Claude Code plugin
 
-The repository now ships a Claude Code plugin under `.claude-plugin/`, hooks under `hooks/`, and a skill under `skills/tracegrep/`.
+The repository now ships a Claude Code plugin under `.claude-plugin/` and a skill under `skills/tracegrep/`.
 
 When Claude Code loads this plugin, the `tracegrep` skill tells the agent to:
 
@@ -86,10 +86,3 @@ When Claude Code loads this plugin, the `tracegrep` skill tells the agent to:
 - use `--json` only when structured output is needed
 - fall back to `tracegrep` or `cargo run --` if needed
 - use plain `rg` or `grep` only when the user explicitly asks for them or the search target is outside tracegrep's model
-
-The plugin hooks reinforce that behavior by:
-
-- injecting the skill text at session start
-- letting Claude Code's built-in `Grep` tool run normally
-- rerunning `Grep` queries through `tg` and attaching the full annotated output through a `PostToolUse` hook
-- denying Bash `rg`, `grep`, and `git grep` searches so Claude reruns them with a tracegrep-aware path

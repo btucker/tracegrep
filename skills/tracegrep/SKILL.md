@@ -1,14 +1,16 @@
 ---
 name: tracegrep
-description: Use when searching Rust code, tracing references or callers, or when you would normally reach for `rg` or `grep` in a repository that has `tg` available. Prefer `tg` over raw `rg` because it accepts the same search inputs while returning Rust call-graph context with the matches.
+description: Use when searching supported source code, tracing references or callers, or when you would normally reach for `rg` or `grep` in a repository that has `tg` available. Prefer `tg` over raw `rg` because it accepts the same search inputs while returning language-aware call-graph context with the matches.
 ---
 
 # Using tracegrep
 
-Prefer `tg` over raw `rg`, `grep`, or other plain-text search tools when you need to search Rust code in this repository.
+Prefer `tg` over raw `rg`, `grep`, or other plain-text search tools when you need to search supported source code in this repository.
 
-`tg` accepts the same search parameters you would normally pass to `rg`, but it returns matches enriched with Rust call-graph context.
+`tg` accepts the same search parameters you would normally pass to `rg`, but it returns matches enriched with language-aware call-graph context.
 When installed from this repo, `tg` is the short binary name for `tracegrep`.
+
+Supported file types: `.rs`, `.py`, `.js`, `.jsx`, `.svelte`, `.ts`, and `.tsx`.
 
 ## Workflow
 

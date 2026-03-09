@@ -1,6 +1,6 @@
 {
   "name": "tracegrep",
-  "description": "Claude Code skill and hooks that augment Grep with tg annotations and steer shell rg to tg",
+  "description": "Claude Code skill for tracegrep-aware search across .rs, .py, .js, .jsx, .svelte, .ts, and .tsx files",
   "version": "0.1.0",
   "author": {
     "name": "Ben Tucker",
@@ -9,5 +9,5 @@
   "homepage": "https://github.com/btucker/tracegrep",
   "repository": "https://github.com/btucker/tracegrep",
   "license": "MIT",
-  "keywords": ["skills", "hooks", "search", "tracegrep", "rust", "code-search"]
+  "keywords": ["skills", "search", "tracegrep", "rust", "python", "javascript", "typescript", "svelte", "code-search"]
 }
