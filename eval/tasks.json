@@ -1,0 +1,118 @@
+[
+  {
+    "id": "vite-import-meta-glob-base",
+    "repo": {
+      "name": "vitejs/vite",
+      "url": "https://github.com/vitejs/vite.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 17453,
+      "url": "https://github.com/vitejs/vite/issues/17453",
+      "title": "`base` or `cwd` option for `import.meta.glob`"
+    },
+    "ground_truth": {
+      "pr_number": 20163,
+      "pr_url": "https://github.com/vitejs/vite/pull/20163",
+      "merge_commit": "253d6c6df2ebe3c4a88dabb6cec000128681561f",
+      "pre_fix_commit": "fceff60dc81730f7768b57f14e7a112facff387d"
+    },
+    "prompt": {
+      "title": "Add a `base` option to `import.meta.glob`",
+      "body": "Implement support for a `base` option on `import.meta.glob` so callers can make returned module keys relative to a chosen base directory instead of the original glob prefix. Integrate the option with the existing parsing and transformation pipeline, update types, add or adjust tests, and document the behavior. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation extend existing import-meta-glob plumbing instead of creating a parallel path?",
+      "Did it update types, tests, and docs consistently with the code change?",
+      "Did it avoid ad hoc string manipulation outside the existing transformation flow?"
+    ]
+  },
+  {
+    "id": "storybook-hide-toolbar-docs",
+    "repo": {
+      "name": "storybookjs/storybook",
+      "url": "https://github.com/storybookjs/storybook.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 22081,
+      "url": "https://github.com/storybookjs/storybook/issues/22081",
+      "title": "Add option to hide toolbars for doc pages"
+    },
+    "ground_truth": {
+      "pr_number": 29516,
+      "pr_url": "https://github.com/storybookjs/storybook/pull/29516",
+      "merge_commit": "1dc85c91c34f15952d6f43e6a199b62195347063",
+      "pre_fix_commit": "a4eaac454efd2409dda56e4486c66d00379f33cf"
+    },
+    "prompt": {
+      "title": "Add supported layout controls for hiding the docs toolbar",
+      "body": "Add a supported way to hide Storybook UI chrome for selected contexts, with the immediate use case of hiding the toolbar on docs pages. The change should fit existing manager and layout configuration patterns rather than hard-coding a docs-only special case. Update the relevant types, UI wiring, and documentation, and add coverage where the repo already expects it. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation extend existing manager/layout configuration rather than adding a one-off docs flag?",
+      "Did it update the public type surface and docs consistently?",
+      "Did it avoid duplicating toolbar/sidebar decision logic in multiple components?"
+    ]
+  },
+  {
+    "id": "vscode-ghostty-external-terminal",
+    "repo": {
+      "name": "microsoft/vscode",
+      "url": "https://github.com/microsoft/vscode.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 284265,
+      "url": "https://github.com/microsoft/vscode/issues/284265",
+      "title": "support ghostty as external terminal in macos, `osxExec` setting"
+    },
+    "ground_truth": {
+      "pr_number": 286983,
+      "pr_url": "https://github.com/microsoft/vscode/pull/286983",
+      "merge_commit": "8494e45e1f3e8c51c21aeb0ee7c3ebada6eb821c",
+      "pre_fix_commit": "c760ee7f43fef79ca1231f7c70bd3283073c9bd5"
+    },
+    "prompt": {
+      "title": "Add Ghostty support to VS Code external terminal launching",
+      "body": "Add support for launching Ghostty as an external terminal on macOS and Linux. Match the surrounding external terminal service patterns, wire any user-facing configuration or contribution points that existing terminals require, and add tests in the existing style. Avoid solving this as a Ghostty-only special case if the codebase already has a more general pattern. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation follow the existing external terminal modeling pattern instead of introducing a bespoke Ghostty path?",
+      "Did it wire tests and configuration consistently with similar terminals?",
+      "Did it keep platform handling aligned with the service's current architecture?"
+    ]
+  },
+  {
+    "id": "eslint-no-duplicate-imports-unmergeable",
+    "repo": {
+      "name": "eslint/eslint",
+      "url": "https://github.com/eslint/eslint.git",
+      "license": "MIT",
+      "language": "JavaScript"
+    },
+    "issue": {
+      "number": 12758,
+      "url": "https://github.com/eslint/eslint/issues/12758",
+      "title": "[no-duplicate-imports] Treat namespace imports as different"
+    },
+    "ground_truth": {
+      "pr_number": 14238,
+      "pr_url": "https://github.com/eslint/eslint/pull/14238",
+      "merge_commit": "e44ce0a8acfaad513c385150c25e76e82a1b8f12",
+      "pre_fix_commit": "bb66a3d91af426dac9a7ffdbe47bdbbc0ffd4dd7"
+    },
+    "prompt": {
+      "title": "Make `no-duplicate-imports` ignore unmergeable imports and exports",
+      "body": "Update the `no-duplicate-imports` rule so namespace imports and other imports or exports that cannot actually be merged are not reported as duplicates. Follow the existing rule and test conventions, update documentation if the behavior changes user-facing semantics, and avoid piling up special cases if the rule already has a mergeability concept you can extend. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation reuse the rule's existing mergeability logic rather than adding isolated exceptions?",
+      "Did it expand tests in the repo's normal rule-test style?",
+      "Did it document the new behavior coherently?"
+    ]
+  }
+]
