@@ -1,9 +1,8 @@
-use clap::Parser;
 use tracegrep::cli::Cli;
 use tracegrep::commands;
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse()?;
 
     commands::query::run(commands::query::QueryOptions {
         json_output: cli.json,

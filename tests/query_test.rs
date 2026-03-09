@@ -65,7 +65,7 @@ fn handle(method: &str) {}
 fn test_query_finds_matches_with_call_context() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["validate_body", "--repo", dir.path().to_str().unwrap()])
+        .args(["--repo", dir.path().to_str().unwrap(), "validate_body"])
         .output()
         .unwrap();
 
@@ -88,10 +88,10 @@ fn test_query_json_output() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
         .args([
-            "--json",
-            "validate_body",
             "--repo",
             dir.path().to_str().unwrap(),
+            "--json",
+            "validate_body",
         ])
         .output()
         .unwrap();
@@ -124,10 +124,10 @@ fn test_query_shows_branch_conditions() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
         .args([
-            "--json",
-            "validate_body",
             "--repo",
             dir.path().to_str().unwrap(),
+            "--json",
+            "validate_body",
         ])
         .output()
         .unwrap();
@@ -181,7 +181,7 @@ fn test_query_auto_builds_graph() {
     run(&["commit", "-m", "init"]);
 
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["hello", "--repo", dir.path().to_str().unwrap()])
+        .args(["--repo", dir.path().to_str().unwrap(), "hello"])
         .output()
         .unwrap();
 
@@ -198,11 +198,11 @@ fn test_query_passes_rg_flags() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
         .args([
-            "validate_body",
             "--repo",
             dir.path().to_str().unwrap(),
             "-t",
             "rust",
+            "validate_body",
         ])
         .output()
         .unwrap();
@@ -222,10 +222,10 @@ fn test_query_uses_rg_style_colors_when_forced() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
         .args([
-            "validate_body",
             "--repo",
             dir.path().to_str().unwrap(),
             "--color=always",
+            "validate_body",
         ])
         .output()
         .unwrap();
@@ -253,10 +253,10 @@ fn test_query_respects_color_never() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
         .args([
-            "validate_body",
             "--repo",
             dir.path().to_str().unwrap(),
             "--color=never",
+            "validate_body",
         ])
         .output()
         .unwrap();
@@ -275,10 +275,10 @@ fn test_query_hides_test_callers_by_default() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
         .args([
-            "--include-tests",
-            "validate_body",
             "--repo",
             dir.path().to_str().unwrap(),
+            "--include-tests",
+            "validate_body",
         ])
         .output()
         .unwrap();
@@ -298,11 +298,11 @@ fn test_query_can_show_test_callers_explicitly() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
         .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
             "--include-tests",
             "--include-test-callers",
             "validate_body",
-            "--repo",
-            dir.path().to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -321,7 +321,7 @@ fn test_query_can_show_test_callers_explicitly() {
 fn test_query_shows_references_separately_from_callers() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["validate_body", "--repo", dir.path().to_str().unwrap()])
+        .args(["--repo", dir.path().to_str().unwrap(), "validate_body"])
         .output()
         .unwrap();
 
@@ -339,10 +339,10 @@ fn test_query_compact_inlines_context_sections() {
     let dir = create_query_test_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
         .args([
-            "--compact",
-            "validating",
             "--repo",
             dir.path().to_str().unwrap(),
+            "--compact",
+            "validating",
         ])
         .output()
         .unwrap();
@@ -389,7 +389,7 @@ fn test_query_rebuilds_stale_cache_after_head_changes() {
     run_git(&["commit", "-m", "initial"]);
 
     let first = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["hello", "--repo", dir.path().to_str().unwrap()])
+        .args(["--repo", dir.path().to_str().unwrap(), "hello"])
         .output()
         .unwrap();
     assert!(
@@ -407,7 +407,7 @@ fn test_query_rebuilds_stale_cache_after_head_changes() {
     run_git(&["commit", "-m", "add caller"]);
 
     let second = Command::new(env!("CARGO_BIN_EXE_tracegrep"))
-        .args(["hello", "--repo", dir.path().to_str().unwrap()])
+        .args(["--repo", dir.path().to_str().unwrap(), "hello"])
         .output()
         .unwrap();
     let stdout = String::from_utf8(second.stdout).unwrap();
