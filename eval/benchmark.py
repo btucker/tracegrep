@@ -208,7 +208,7 @@ def build_prompt(task: dict[str, Any], condition: str) -> str:
             Constraints:
             - Work only from the checked-out repository state and this prompt.
             - Do not browse the web, open GitHub issues or PRs, or inspect repository history beyond the current checkout.
-            - Favor reuse of existing abstractions and patterns over adding parallel implementations.
+            - Keep the change consistent with the surrounding code and tests.
             - Run relevant tests or checks before finishing, and mention what you ran.
             """
         ).strip(),

@@ -20,7 +20,7 @@
     },
     "prompt": {
       "title": "Add a `base` option to `import.meta.glob`",
-      "body": "Implement support for a `base` option on `import.meta.glob` so callers can make returned module keys relative to a chosen base directory instead of the original glob prefix. Integrate the option with the existing parsing and transformation pipeline, update types, add or adjust tests, and document the behavior. Work only from the checked-out repository state and this prompt."
+      "body": "Implement support for a `base` option on `import.meta.glob` so callers can make returned module keys relative to a chosen base directory instead of the original glob prefix. Update any relevant types, tests, and documentation. Work only from the checked-out repository state and this prompt."
     },
     "evaluation_focus": [
       "Did the implementation extend existing import-meta-glob plumbing instead of creating a parallel path?",
@@ -49,7 +49,7 @@
     },
     "prompt": {
       "title": "Add supported layout controls for hiding the docs toolbar",
-      "body": "Add a supported way to hide Storybook UI chrome for selected contexts, with the immediate use case of hiding the toolbar on docs pages. The change should fit existing manager and layout configuration patterns rather than hard-coding a docs-only special case. Update the relevant types, UI wiring, and documentation, and add coverage where the repo already expects it. Work only from the checked-out repository state and this prompt."
+      "body": "Add a way to hide Storybook UI chrome for selected contexts, with the immediate use case of hiding the toolbar on docs pages. Update the relevant types, UI wiring, documentation, and any coverage the repo expects. Work only from the checked-out repository state and this prompt."
     },
     "evaluation_focus": [
       "Did the implementation extend existing manager/layout configuration rather than adding a one-off docs flag?",
@@ -78,7 +78,7 @@
     },
     "prompt": {
       "title": "Add Ghostty support to VS Code external terminal launching",
-      "body": "Add support for launching Ghostty as an external terminal on macOS and Linux. Match the surrounding external terminal service patterns, wire any user-facing configuration or contribution points that existing terminals require, and add tests in the existing style. Avoid solving this as a Ghostty-only special case if the codebase already has a more general pattern. Work only from the checked-out repository state and this prompt."
+      "body": "Add support for launching Ghostty as an external terminal on macOS and Linux. Wire any required configuration or contribution points and add tests in the repository's normal style. Work only from the checked-out repository state and this prompt."
     },
     "evaluation_focus": [
       "Did the implementation follow the existing external terminal modeling pattern instead of introducing a bespoke Ghostty path?",
@@ -107,7 +107,7 @@
     },
     "prompt": {
       "title": "Make `no-duplicate-imports` ignore unmergeable imports and exports",
-      "body": "Update the `no-duplicate-imports` rule so namespace imports and other imports or exports that cannot actually be merged are not reported as duplicates. Follow the existing rule and test conventions, update documentation if the behavior changes user-facing semantics, and avoid piling up special cases if the rule already has a mergeability concept you can extend. Work only from the checked-out repository state and this prompt."
+      "body": "Update the `no-duplicate-imports` rule so namespace imports and other imports or exports that cannot actually be merged are not reported as duplicates. Update tests and documentation as needed for the behavior change. Work only from the checked-out repository state and this prompt."
     },
     "evaluation_focus": [
       "Did the implementation reuse the rule's existing mergeability logic rather than adding isolated exceptions?",
