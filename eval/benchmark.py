@@ -267,52 +267,50 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
         command = 'exec claude "$@" "$(cat "$PROMPT_FILE")"'
     else:
         raise ValueError(f"unsupported agent: {agent}")
-    preflight = ""
-    env_setup = ""
+    preflight_lines: list[str] = []
+    env_setup_lines: list[str] = []
     if condition == "tg":
-        env_setup = textwrap.dedent(
-            f"""\
-            export PATH="{tg_path.parent}:$PATH"
-            export TRACEGREP_CACHE_DIR="{cache_root}"
-
-            """
-        )
+        env_setup_lines = [
+            f'export PATH="{tg_path.parent}:$PATH"',
+            f'export TRACEGREP_CACHE_DIR="{cache_root}"',
+        ]
     if agent == "claude" and condition == "tg":
-        preflight = textwrap.dedent(
-            """\
-            PLUGIN_ID="tracegrep@tracegrep-dev"
-            if ! claude plugin list --json | python3 -c '
-            import json
-            import sys
+        preflight_lines = [
+            'PLUGIN_ID="tracegrep@tracegrep-dev"',
+            "if ! claude plugin list --json | python3 -c '",
+            "import json",
+            "import sys",
+            "",
+            "plugin_id = sys.argv[1]",
+            "plugins = json.load(sys.stdin)",
+            'installed = any(plugin.get("id") == plugin_id for plugin in plugins)',
+            "sys.exit(0 if installed else 1)",
+            '\' "$PLUGIN_ID"; then',
+            '  echo "Required Claude plugin not installed: $PLUGIN_ID" >&2',
+            '  echo "Run this once from the worktree to install it:" >&2',
+            '  echo "  claude plugin install $PLUGIN_ID" >&2',
+            "  exit 1",
+            "fi",
+        ]
 
-            plugin_id = sys.argv[1]
-            plugins = json.load(sys.stdin)
-            installed = any(plugin.get("id") == plugin_id for plugin in plugins)
-            sys.exit(0 if installed else 1)
-            ' "$PLUGIN_ID"; then
-              echo "Required Claude plugin not installed: $PLUGIN_ID" >&2
-              echo "Run this once from the worktree to install it:" >&2
-              echo "  claude plugin install $PLUGIN_ID" >&2
-              exit 1
-            fi
-
-            """
-        )
-    return textwrap.dedent(
-        f"""\
-        #!/usr/bin/env bash
-        set -euo pipefail
-
-        BASE_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-        WORKTREE="{worktree}"
-        PROMPT_FILE="{prompt_file}"
-
-        cd "$WORKTREE"
-        {env_setup}\
-        {preflight}\
-        {command}
-        """
-    )
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        'BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+        f'WORKTREE="{worktree}"',
+        f'PROMPT_FILE="{prompt_file}"',
+        "",
+        'cd "$WORKTREE"',
+    ]
+    if env_setup_lines:
+        lines.extend(env_setup_lines)
+        lines.append("")
+    if preflight_lines:
+        lines.extend(preflight_lines)
+        lines.append("")
+    lines.append(command)
+    return "\n".join(lines) + "\n"
 
 
 def write_json(path: Path, data: Any) -> None:
