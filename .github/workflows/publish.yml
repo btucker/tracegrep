@@ -9,8 +9,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  checks:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
   publish:
     name: Publish to crates.io
+    needs: checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
