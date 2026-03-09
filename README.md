@@ -4,7 +4,56 @@
 
 It exists to give coding agent instant context for how a line of code is used in the codebase. This allows the coding agent to gain a more complete understanding prior to making changes.
 
-This repo also includes a Claude Code plugin and skill that add tracegrep call-graph context to Claude's normal search flow.
+This repo also includes a Claude Code skill for tracegrep-aware search flow.
+
+## Installation
+
+Note: installation differs by environment. The CLI installs with Cargo. Claude Code can also load the packaged skill via the repo's plugin metadata.
+
+### CLI
+
+Install `rg` first, then install `tracegrep` from this repo:
+
+```bash
+cargo install --path .
+```
+
+This installs both `tracegrep` and `tg`.
+
+### Claude Code (via Plugin Marketplace)
+
+In Claude Code, register the repository marketplace first:
+
+```text
+/plugin marketplace add btucker/tracegrep
+```
+
+Then install the plugin from that marketplace:
+
+```text
+/plugin install tracegrep@tracegrep-dev
+```
+
+### Codex and other agents
+
+Use the CLI directly and point the agent at the local skill file:
+
+```text
+skills/tracegrep/SKILL.md
+```
+
+That keeps the setup explicit: the agent gets the search workflow from the skill, and `tg` provides the actual search behavior.
+
+### Verify installation
+
+Verify the CLI:
+
+```bash
+tracegrep --version
+tg --help
+```
+
+In Claude Code, start a fresh session and ask it to search the repo. It should prefer `tg`/`tracegrep`-aware search flow rather than raw `rg`.
 
 ## Usage
 
@@ -76,11 +125,11 @@ tests/integration.rs:2:    validate_body();</code></pre>
 - Function references passed as arguments are shown separately from direct callers.
 - The current resolver is heuristic and language-local; it does not attempt import-aware or type-aware cross-file analysis.
 
-## Claude Code plugin
+## Claude Code skill
 
-The repository now ships a Claude Code plugin under `.claude-plugin/` and a skill under `skills/tracegrep/`.
+The repository ships a Claude Code skill under `skills/tracegrep/`.
 
-When Claude Code loads this plugin, the `tracegrep` skill tells the agent to:
+The `tracegrep` skill tells the agent to:
 
 - prefer tracegrep-aware search instead of raw shell `rg`
 - use `--json` only when structured output is needed
