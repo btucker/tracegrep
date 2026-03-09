@@ -1,0 +1,13 @@
+{
+  "name": "tracegrep",
+  "description": "Claude Code skill and hooks that augment Grep with tg annotations and steer shell rg to tg",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ben Tucker",
+    "email": "ben@btucker.net"
+  },
+  "homepage": "https://github.com/btucker/tracegrep",
+  "repository": "https://github.com/btucker/tracegrep",
+  "license": "MIT",
+  "keywords": ["skills", "hooks", "search", "tracegrep", "rust", "code-search"]
+}
