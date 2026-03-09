@@ -8,15 +8,17 @@ This repo also includes a Claude Code plugin, hooks, and skill that add tracegre
 
 ## Usage
 
+After `cargo install --path .`, both `tracegrep` and `tg` are installed.
+
 ```bash
 # Search with caller/reference context
-tracegrep tool_data /path/to/repo
+tg tool_data /path/to/repo
 
 # Inline context onto the location line
-tracegrep --compact tool_data /path/to/repo
+tg --compact tool_data /path/to/repo
 
 # Include test callers when they matter
-tracegrep --include-tests --include-test-callers tool_data /path/to/repo
+tg --include-tests --include-test-callers tool_data /path/to/repo
 
 # Or keep using the older explicit form
 tracegrep --repo /path/to/repo tool_data
@@ -30,7 +32,7 @@ shape immediately:
 <table>
   <tr>
     <th><code>rg -n validate_body</code></th>
-    <th><code>tracegrep validate_body /path/to/repo</code></th>
+    <th><code>tg validate_body /path/to/repo</code></th>
   </tr>
   <tr>
     <td valign="top">
