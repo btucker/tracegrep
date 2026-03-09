@@ -2,7 +2,7 @@
 
 `tracegrep` layers Rust call-graph context on top of `rg` results.
 
-This repo also includes a Claude Code plugin and skill that tell the agent to prefer `tg` over plain grep-style search.
+This repo also includes a Claude Code plugin, hooks, and skill that tell the agent to prefer `tg` over plain grep-style search.
 
 ## Usage
 
@@ -26,7 +26,7 @@ tracegrep --include-tests --include-test-callers tool_data --repo /path/to/repo
 
 ## Claude Code plugin
 
-The repository now ships a Claude Code plugin under `.claude-plugin/` and a skill under `skills/search-with-call-graph-context/`.
+The repository now ships a Claude Code plugin under `.claude-plugin/`, hooks under `hooks/`, and a skill under `skills/search-with-call-graph-context/`.
 
 When Claude Code loads this plugin, the `search-with-call-graph-context` skill tells the agent to:
 
@@ -34,3 +34,9 @@ When Claude Code loads this plugin, the `search-with-call-graph-context` skill t
 - use `--json` only when structured output is needed
 - fall back to `tracegrep` or `cargo run --` if needed
 - use plain `rg` or `grep` only when the user explicitly asks for them or the search target is outside tracegrep's model
+
+The plugin hooks reinforce that behavior by:
+
+- injecting the skill text at session start
+- denying Claude Code's built-in `Grep` tool for repository search in this repo
+- denying Bash `rg`, `grep`, and `git grep` searches so Claude reruns them with `tg`

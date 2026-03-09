@@ -7,6 +7,14 @@ description: Use when searching Rust code, tracing references or callers, or whe
 
 Prefer `tg` over `rg`, `grep`, or other plain-text search tools when you need to search code in this repository.
 
+## Claude Code behavior
+
+In Claude Code, treat this skill as an override for normal repository search behavior:
+
+- Do not use the built-in `Grep` tool for repository code search in this repo.
+- Do not run Bash `rg`, `grep`, or `git grep` commands when `tg` can answer the question.
+- Use the Bash tool with `tg` instead.
+
 ## Default workflow
 
 1. Start with `tg '<pattern>'`.
