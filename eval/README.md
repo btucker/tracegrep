@@ -68,6 +68,8 @@ For the `tg` worktree only, `prepare` also creates:
 
 - `.codex/skills/tracegrep/` copied from this repo's `skills/tracegrep/`
 - `.claude/settings.local.json` enabling the `tracegrep@tracegrep-dev` plugin marketplace entry
+- `.eval-bin/tg` copied from the host `tg` binary so the workspace sandbox can execute it
+- `.tracegrep-cache/` for cache writes inside the prepared worktree
 - the generated Claude `tg` launcher checks `claude plugin list --json` and fails fast if `tracegrep@tracegrep-dev` is not installed
 
 ## Notes
@@ -76,5 +78,6 @@ For the `tg` worktree only, `prepare` also creates:
 - The `control` prompt explicitly forbids `tg`.
 - The `tg` prompt explicitly prefers `tg`/`tracegrep` for supported source files.
 - The benchmark is about agent use of `tg`, so the `tg` condition includes the agent-specific skill/plugin wiring needed to expose it naturally.
+- The generated launchers prepend `.eval-bin/` to `PATH` and set `TRACEGREP_CACHE_DIR` to `.tracegrep-cache/` so `tg` stays usable inside the workspace sandbox.
 - The `control` worktree does not get the Codex skill or Claude plugin config.
 - For tasks where the original issue contained solution leakage, the manifest uses a redacted benchmark prompt instead.

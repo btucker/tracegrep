@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::analysis;
 use crate::analysis::codepaths::{self, merge_graphs, CallGraph, FileArtifact, Language};
 
+const CACHE_DIR_ENV: &str = "TRACEGREP_CACHE_DIR";
 const CACHE_DIR: &str = ".cache/tracegrep";
 const SCHEMA_VERSION: u32 = 4;
 
@@ -63,7 +64,13 @@ fn hex_hash(bytes: &[u8]) -> String {
 }
 
 fn repo_cache_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME is not set"))?;
+    let cache_root = std::env::var_os(CACHE_DIR_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").expect("HOME is not set");
+            PathBuf::from(home).join(CACHE_DIR)
+        });
     let repo_key = repo_path.to_string_lossy();
     let slug = repo_path
         .file_name()
@@ -71,9 +78,7 @@ fn repo_cache_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
         .filter(|name| !name.is_empty())
         .unwrap_or("repo");
     let hash = &hex_hash(repo_key.as_bytes())[..16];
-    Ok(PathBuf::from(home)
-        .join(CACHE_DIR)
-        .join(format!("{slug}-{hash}")))
+    Ok(cache_root.join(format!("{slug}-{hash}")))
 }
 
 pub fn graph_cache_path(

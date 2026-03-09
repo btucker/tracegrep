@@ -54,6 +54,14 @@ def launch_script_path(root: Path, task_id: str, agent: str, condition: str) -> 
     return run_dir(root, task_id) / f"launch_{agent}_{condition}.sh"
 
 
+def local_tg_path(worktree: Path) -> Path:
+    return worktree / ".eval-bin" / "tg"
+
+
+def local_cache_root(worktree: Path) -> Path:
+    return worktree / ".tracegrep-cache"
+
+
 def run(
     args: list[str],
     *,
@@ -122,6 +130,13 @@ def remove_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def host_tg_binary() -> Path:
+    tg = shutil.which("tg")
+    if tg is None:
+        raise SystemExit("`tg` was not found on PATH")
+    return Path(tg).resolve()
+
+
 def write_claude_settings(path: Path) -> None:
     settings = {
         "$schema": "https://json.schemastore.org/claude-code-settings.json",
@@ -144,6 +159,8 @@ def write_claude_settings(path: Path) -> None:
 def configure_condition_environment(worktree: Path, condition: str) -> None:
     codex_skill_dir = worktree / ".codex" / "skills" / "tracegrep"
     claude_settings_path = worktree / ".claude" / "settings.local.json"
+    tg_binary_path = local_tg_path(worktree)
+    cache_root = local_cache_root(worktree)
 
     if condition == "tg":
         if not TRACEGREP_SKILL_SOURCE.exists():
@@ -153,11 +170,17 @@ def configure_condition_environment(worktree: Path, condition: str) -> None:
         shutil.copytree(TRACEGREP_SKILL_SOURCE, codex_skill_dir)
         claude_settings_path.parent.mkdir(parents=True, exist_ok=True)
         write_claude_settings(claude_settings_path)
+        tg_binary_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(host_tg_binary(), tg_binary_path)
+        tg_binary_path.chmod(0o755)
+        cache_root.mkdir(parents=True, exist_ok=True)
         return
 
     remove_tree(codex_skill_dir)
     if claude_settings_path.exists():
         claude_settings_path.unlink()
+    remove_tree(tg_binary_path)
+    remove_tree(cache_root)
 
 
 def condition_search_guidance(condition: str) -> str:
@@ -176,7 +199,6 @@ def condition_search_guidance(condition: str) -> str:
 
 def build_prompt(task: dict[str, Any], condition: str) -> str:
     body = task["prompt"]["body"].strip()
-    focus = "\n".join(f"- {item}" for item in task["evaluation_focus"])
     parts = [
         "# Benchmark Task",
         f"Task: {task['prompt']['title']}",
@@ -191,7 +213,6 @@ def build_prompt(task: dict[str, Any], condition: str) -> str:
             """
         ).strip(),
         condition_search_guidance(condition),
-        "What to optimize for:\n" + focus,
     ]
     return "\n\n".join(parts) + "\n"
 
@@ -227,6 +248,8 @@ def build_run_readme(task: dict[str, Any], root: Path) -> str:
             "tg condition environment additions:",
             "- `.codex/skills/tracegrep/` copied from this repo",
             "- `.claude/settings.local.json` enabling `tracegrep@tracegrep-dev`",
+            "- `.eval-bin/tg` copied from the host `tg` binary so the workspace sandbox can execute it",
+            "- `.tracegrep-cache/` used via `TRACEGREP_CACHE_DIR` to keep cache writes inside the worktree",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -236,16 +259,24 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
     base = run_dir(root, task["id"])
     prompt_file = base / "prompts" / f"{condition}.md"
     worktree = base / "worktrees" / condition
+    tg_path = local_tg_path(worktree)
+    cache_root = local_cache_root(worktree)
     if agent == "codex":
-        command = (
-            'exec codex --sandbox workspace-write --ask-for-approval never "$@" '
-            '"$(cat "$PROMPT_FILE")"'
-        )
+        command = 'exec codex --full-auto "$@" "$(cat "$PROMPT_FILE")"'
     elif agent == "claude":
         command = 'exec claude "$@" "$(cat "$PROMPT_FILE")"'
     else:
         raise ValueError(f"unsupported agent: {agent}")
     preflight = ""
+    env_setup = ""
+    if condition == "tg":
+        env_setup = textwrap.dedent(
+            f"""\
+            export PATH="{tg_path.parent}:$PATH"
+            export TRACEGREP_CACHE_DIR="{cache_root}"
+
+            """
+        )
     if agent == "claude" and condition == "tg":
         preflight = textwrap.dedent(
             """\
@@ -277,6 +308,7 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
         PROMPT_FILE="{prompt_file}"
 
         cd "$WORKTREE"
+        {env_setup}\
         {preflight}\
         {command}
         """
