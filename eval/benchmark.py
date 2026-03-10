@@ -6,23 +6,126 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 TASKS_PATH = SCRIPT_DIR / "tasks.json"
 DEFAULT_ROOT = SCRIPT_DIR / "workspaces"
+DEFAULT_FORK_OWNER = "btucker"
+DEFAULT_JUDGE_AGENT = "claude"
 SUPPORTED_AGENTS = ("codex", "claude")
 SUPPORTED_CONDITIONS = ("control", "tg")
 TRACEGREP_SKILL_SOURCE = SCRIPT_DIR.parent / "skills" / "tracegrep"
+BENCHMARK_EXPORT_NAME = "tracegrep-eval"
+BENCHMARK_EXPORT_EMAIL = "tracegrep-eval@example.com"
+
+JUDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "better_matches_pr",
+        "better_overall",
+        "confidence",
+        "scores",
+        "A_vs_pr_differences",
+        "B_vs_pr_differences",
+        "A_vs_B_differences",
+        "notable_strengths",
+        "notable_risks",
+        "summary",
+    ],
+    "properties": {
+        "better_matches_pr": {"type": "string", "enum": ["A", "B", "tie"]},
+        "better_overall": {"type": "string", "enum": ["A", "B", "tie"]},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "scores": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["A", "B"],
+            "properties": {
+                "A": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "pr_alignment",
+                        "reuse_alignment",
+                        "duplication_risk",
+                        "test_alignment",
+                    ],
+                    "properties": {
+                        "pr_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "reuse_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "duplication_risk": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "test_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
+                    },
+                },
+                "B": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "pr_alignment",
+                        "reuse_alignment",
+                        "duplication_risk",
+                        "test_alignment",
+                    ],
+                    "properties": {
+                        "pr_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "reuse_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "duplication_risk": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "test_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
+                    },
+                },
+            },
+        },
+        "A_vs_pr_differences": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 10,
+        },
+        "B_vs_pr_differences": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 10,
+        },
+        "A_vs_B_differences": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 10,
+        },
+        "notable_strengths": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["A", "B"],
+            "properties": {
+                "A": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                "B": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            },
+        },
+        "notable_risks": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["A", "B"],
+            "properties": {
+                "A": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                "B": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            },
+        },
+        "summary": {"type": "string"},
+    },
+}
 
 
 def load_tasks() -> dict[str, dict[str, Any]]:
@@ -32,6 +135,10 @@ def load_tasks() -> dict[str, dict[str, Any]]:
 
 def repo_slug(task: dict[str, Any]) -> str:
     return task["repo"]["name"].replace("/", "__")
+
+
+def repo_basename(task: dict[str, Any]) -> str:
+    return task["repo"]["name"].split("/", 1)[1]
 
 
 def cache_repo_dir(root: Path, task: dict[str, Any]) -> Path:
@@ -54,6 +161,22 @@ def launch_script_path(root: Path, task_id: str, agent: str, condition: str) -> 
     return run_dir(root, task_id) / f"launch_{agent}_{condition}.sh"
 
 
+def evaluations_root(root: Path, task_id: str, agent: str) -> Path:
+    return run_dir(root, task_id) / "evaluations" / agent
+
+
+def evaluation_dir(root: Path, task_id: str, agent: str, eval_id: str) -> Path:
+    return evaluations_root(root, task_id, agent) / eval_id
+
+
+def reports_dir(root: Path) -> Path:
+    return root.parent / "reports"
+
+
+def evaluation_report_path(root: Path, task_id: str, agent: str, eval_id: str) -> Path:
+    return reports_dir(root) / task_id / agent / f"{eval_id}.md"
+
+
 def local_tg_path(worktree: Path) -> Path:
     return worktree / ".eval-bin" / "tg"
 
@@ -67,19 +190,25 @@ def run(
     *,
     cwd: Path | None = None,
     capture_output: bool = False,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         cwd=str(cwd) if cwd else None,
-        check=True,
+        check=check,
         text=True,
         capture_output=capture_output,
+        env=env,
+        input=input_text,
     )
 
 
 def ensure_root(root: Path) -> None:
     (root / "cache").mkdir(parents=True, exist_ok=True)
     (root / "runs").mkdir(parents=True, exist_ok=True)
+    reports_dir(root).mkdir(parents=True, exist_ok=True)
 
 
 def ensure_repo_cache(root: Path, task: dict[str, Any]) -> Path:
@@ -130,11 +259,32 @@ def remove_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def load_json(path: Path) -> Any:
+    return json.loads(path.read_text())
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
 def host_tg_binary() -> Path:
     tg = shutil.which("tg")
     if tg is None:
         raise SystemExit("`tg` was not found on PATH")
     return Path(tg).resolve()
+
+
+def require_command(name: str) -> str:
+    path = shutil.which(name)
+    if path is None:
+        raise SystemExit(f"`{name}` was not found on PATH")
+    return path
 
 
 def write_claude_settings(path: Path) -> None:
@@ -250,6 +400,11 @@ def build_run_readme(task: dict[str, Any], root: Path) -> str:
             "- `.claude/settings.local.json` enabling `tracegrep@tracegrep-dev`",
             "- `.eval-bin/tg` copied from the host `tg` binary so the workspace sandbox can execute it",
             "- `.tracegrep-cache/` used via `TRACEGREP_CACHE_DIR` to keep cache writes inside the worktree",
+            "",
+            "Evaluation flow:",
+            "- `judge` creates blind comparison artifacts under `evaluations/<agent>/<eval-id>/`",
+            "- `publish` pushes both condition snapshots to the GitHub fork under `btucker`",
+            "- `report` renders or refreshes a markdown report for the evaluation",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -269,10 +424,15 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
         raise ValueError(f"unsupported agent: {agent}")
     preflight_lines: list[str] = []
     env_setup_lines: list[str] = []
+    warmup_lines: list[str] = []
     if condition == "tg":
         env_setup_lines = [
             f'export PATH="{tg_path.parent}:$PATH"',
             f'export TRACEGREP_CACHE_DIR="{cache_root}"',
+        ]
+        warmup_lines = [
+            'echo "Prebuilding tracegrep index in $WORKTREE..."',
+            "tg --build-index",
         ]
     if agent == "claude" and condition == "tg":
         preflight_lines = [
@@ -309,13 +469,11 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
     if preflight_lines:
         lines.extend(preflight_lines)
         lines.append("")
+    if warmup_lines:
+        lines.extend(warmup_lines)
+        lines.append("")
     lines.append(command)
     return "\n".join(lines) + "\n"
-
-
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def prepare_task(root: Path, task: dict[str, Any], *, force: bool) -> None:
@@ -406,6 +564,1103 @@ def cmd_launch(
     return completed.returncode
 
 
+def default_judge_agent() -> str:
+    value = os.environ.get("TRACEGREP_EVAL_JUDGE_AGENT", DEFAULT_JUDGE_AGENT)
+    if value not in SUPPORTED_AGENTS:
+        raise SystemExit(
+            "TRACEGREP_EVAL_JUDGE_AGENT must be one of: " + ", ".join(SUPPORTED_AGENTS)
+        )
+    return value
+
+
+def new_eval_id() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def latest_eval_dir(root: Path, task_id: str, agent: str) -> Path:
+    base = evaluations_root(root, task_id, agent)
+    if not base.exists():
+        raise SystemExit(
+            f"No evaluations found for {task_id} agent {agent}. Run `judge` first."
+        )
+    entries = sorted(path for path in base.iterdir() if path.is_dir())
+    if not entries:
+        raise SystemExit(
+            f"No evaluations found for {task_id} agent {agent}. Run `judge` first."
+        )
+    return entries[-1]
+
+
+def resolve_eval_dir(root: Path, task_id: str, agent: str, eval_id: str | None) -> Path:
+    if eval_id is None:
+        return latest_eval_dir(root, task_id, agent)
+    path = evaluation_dir(root, task_id, agent, eval_id)
+    if not path.exists():
+        raise SystemExit(f"Evaluation {eval_id} does not exist for {task_id} agent {agent}.")
+    return path
+
+
+def stable_token(*parts: str, length: int = 12) -> str:
+    digest = hashlib.sha256("::".join(parts).encode("utf-8")).hexdigest()
+    return digest[:length]
+
+
+def build_blind_manifest(
+    *,
+    task_id: str,
+    evaluated_agent: str,
+    eval_id: str,
+    snapshot_commits: dict[str, str],
+) -> dict[str, Any]:
+    flip = int(stable_token(task_id, evaluated_agent, eval_id, length=2), 16) % 2 == 1
+    label_to_condition = {"A": "control", "B": "tg"}
+    if flip:
+        label_to_condition = {"A": "tg", "B": "control"}
+    condition_to_label = {condition: label for label, condition in label_to_condition.items()}
+    return {
+        "task_id": task_id,
+        "evaluated_agent": evaluated_agent,
+        "eval_id": eval_id,
+        "label_to_condition": label_to_condition,
+        "condition_to_label": condition_to_label,
+        "snapshot_commits": snapshot_commits,
+    }
+
+
+def branch_names(task_id: str, evaluated_agent: str, eval_id: str) -> dict[str, str]:
+    opaque_id = stable_token(task_id, evaluated_agent, eval_id, length=16)
+    return {
+        "control": f"benchmark/{opaque_id}/control",
+        "tg": f"benchmark/{opaque_id}/tg",
+    }
+
+
+def benchmark_git_env(index_path: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["GIT_INDEX_FILE"] = index_path
+    env.setdefault("GIT_AUTHOR_NAME", BENCHMARK_EXPORT_NAME)
+    env.setdefault("GIT_AUTHOR_EMAIL", BENCHMARK_EXPORT_EMAIL)
+    env.setdefault("GIT_COMMITTER_NAME", BENCHMARK_EXPORT_NAME)
+    env.setdefault("GIT_COMMITTER_EMAIL", BENCHMARK_EXPORT_EMAIL)
+    return env
+
+
+def snapshot_worktree_commit(worktree: Path, base_commit: str, message: str) -> str:
+    fd, index_path = tempfile.mkstemp(prefix="tracegrep-eval-index-")
+    os.close(fd)
+    try:
+        env = benchmark_git_env(index_path)
+        run(["git", "read-tree", base_commit], cwd=worktree, env=env)
+        run(["git", "add", "-A", "."], cwd=worktree, env=env)
+        tree = run(["git", "write-tree"], cwd=worktree, env=env, capture_output=True).stdout.strip()
+        commit = run(
+            ["git", "commit-tree", tree, "-p", base_commit, "-m", message],
+            cwd=worktree,
+            env=env,
+            capture_output=True,
+        ).stdout.strip()
+        return commit
+    finally:
+        Path(index_path).unlink(missing_ok=True)
+
+
+def git_diff(repo_dir: Path, base_rev: str, target_rev: str) -> str:
+    return run(
+        ["git", "diff", "--binary", "--no-ext-diff", base_rev, target_rev],
+        cwd=repo_dir,
+        capture_output=True,
+    ).stdout
+
+
+def parse_numstat(text: str) -> dict[str, dict[str, int | str]]:
+    stats: dict[str, dict[str, int | str]] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        added, deleted, path = line.split("\t", 2)
+        stats[path] = {
+            "added": -1 if added == "-" else int(added),
+            "deleted": -1 if deleted == "-" else int(deleted),
+        }
+    return stats
+
+
+def parse_name_status(text: str) -> dict[str, dict[str, str]]:
+    statuses: dict[str, dict[str, str]] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        status = parts[0]
+        path = parts[-1]
+        statuses[path] = {"status": status}
+        if status.startswith("R") or status.startswith("C"):
+            statuses[path]["previous_path"] = parts[1]
+    return statuses
+
+
+def diff_file_summary(repo_dir: Path, base_rev: str, target_rev: str) -> dict[str, Any]:
+    numstat = parse_numstat(
+        run(["git", "diff", "--numstat", base_rev, target_rev], cwd=repo_dir, capture_output=True).stdout
+    )
+    statuses = parse_name_status(
+        run(
+            ["git", "diff", "--name-status", base_rev, target_rev],
+            cwd=repo_dir,
+            capture_output=True,
+        ).stdout
+    )
+    files = []
+    for path in sorted(set(numstat) | set(statuses)):
+        item: dict[str, Any] = {"path": path}
+        item.update(statuses.get(path, {"status": "M"}))
+        item.update(numstat.get(path, {"added": 0, "deleted": 0}))
+        files.append(item)
+    return {
+        "base_rev": base_rev,
+        "target_rev": target_rev,
+        "file_count": len(files),
+        "files": files,
+    }
+
+
+def write_diff_artifacts(
+    *,
+    task: dict[str, Any],
+    root: Path,
+    evaluated_agent: str,
+    eval_dir: Path,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    pre_fix = task["ground_truth"]["pre_fix_commit"]
+    cache_dir = ensure_repo_cache(root, task)
+    snapshot_commits: dict[str, str] = {}
+    summaries: dict[str, Any] = {}
+
+    for condition in SUPPORTED_CONDITIONS:
+        worktree = worktree_dir(root, task["id"], condition)
+        if not worktree.exists():
+            raise SystemExit(
+                f"Worktree {worktree} does not exist. Run `uv run eval/benchmark.py prepare {task['id']}` first."
+            )
+        snapshot = snapshot_worktree_commit(
+            worktree,
+            pre_fix,
+            f"Benchmark snapshot for {task['id']} {evaluated_agent} {condition} {eval_dir.name}",
+        )
+        snapshot_commits[condition] = snapshot
+        diff = git_diff(worktree, pre_fix, snapshot)
+        summary = diff_file_summary(worktree, pre_fix, snapshot)
+        write_text(eval_dir / f"{condition}.diff", diff)
+        write_json(eval_dir / f"{condition}_files.json", summary)
+        summaries[condition] = summary
+
+    ground_truth_commit = task["ground_truth"]["merge_commit"]
+    ground_truth_diff = git_diff(cache_dir, pre_fix, ground_truth_commit)
+    ground_truth_summary = diff_file_summary(cache_dir, pre_fix, ground_truth_commit)
+    write_text(eval_dir / "ground_truth.diff", ground_truth_diff)
+    write_json(eval_dir / "ground_truth_files.json", ground_truth_summary)
+    summaries["ground_truth"] = ground_truth_summary
+    return snapshot_commits, summaries
+
+
+def build_judge_input(
+    task: dict[str, Any],
+    blind_manifest: dict[str, Any],
+    eval_dir: Path,
+) -> dict[str, Any]:
+    label_to_condition = blind_manifest["label_to_condition"]
+    implementations = {}
+    for label in ("A", "B"):
+        condition = label_to_condition[label]
+        implementations[label] = {
+            "diff_path": f"{condition}.diff",
+            "diff": (eval_dir / f"{condition}.diff").read_text(),
+            "files": load_json(eval_dir / f"{condition}_files.json"),
+        }
+    return {
+        "task_id": task["id"],
+        "repo": task["repo"],
+        "issue": task["issue"],
+        "prompt": task["prompt"],
+        "evaluation_focus": task["evaluation_focus"],
+        "ground_truth": {
+            **task["ground_truth"],
+            "diff_path": "ground_truth.diff",
+            "diff": (eval_dir / "ground_truth.diff").read_text(),
+            "files": load_json(eval_dir / "ground_truth_files.json"),
+        },
+        "implementations": implementations,
+    }
+
+
+def build_judge_prompt(judge_input: dict[str, Any]) -> str:
+    return textwrap.dedent(
+        f"""\
+        You are evaluating two candidate implementations for a historical benchmark task.
+
+        The judge must stay blind to which implementation came from the control condition and which came from the tracegrep condition.
+
+        Your job:
+        - Compare Implementation A and Implementation B against the accepted human PR diff.
+        - Decide which implementation better matches the accepted PR.
+        - Decide which implementation appears better on its own merits.
+        - Focus on architectural fit, reuse of existing patterns, duplication risk, and test alignment.
+        - Explain how each implementation differs from the accepted PR.
+        - Output only JSON matching the provided schema.
+
+        Task metadata:
+        - Task ID: {judge_input['task_id']}
+        - Repo: {judge_input['repo']['name']}
+        - Issue: #{judge_input['issue']['number']} {judge_input['issue']['title']}
+        - Prompt title: {judge_input['prompt']['title']}
+
+        Benchmark prompt:
+        {judge_input['prompt']['body']}
+
+        Evaluation focus:
+        {json.dumps(judge_input['evaluation_focus'], indent=2)}
+
+        Changed-file summary for Implementation A:
+        {json.dumps(judge_input['implementations']['A']['files'], indent=2)}
+
+        Changed-file summary for Implementation B:
+        {json.dumps(judge_input['implementations']['B']['files'], indent=2)}
+
+        Changed-file summary for the accepted PR:
+        {json.dumps(judge_input['ground_truth']['files'], indent=2)}
+
+        Implementation A diff:
+        ```diff
+        {judge_input['implementations']['A']['diff']}
+        ```
+
+        Implementation B diff:
+        ```diff
+        {judge_input['implementations']['B']['diff']}
+        ```
+
+        Accepted human PR diff:
+        ```diff
+        {judge_input['ground_truth']['diff']}
+        ```
+        """
+    ).strip() + "\n"
+
+
+def extract_json_object(text: str) -> Any:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+            return value
+        except json.JSONDecodeError:
+            continue
+    raise ValueError("Could not find a JSON object in judge output.")
+
+
+def unwrap_possible_json_payload(payload: Any) -> Any:
+    if isinstance(payload, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(payload):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("result", "content", "output", "message", "final", "final_message"):
+            if key not in payload:
+                continue
+            value = payload[key]
+            if isinstance(value, dict):
+                unwrapped = unwrap_possible_json_payload(value)
+                if isinstance(unwrapped, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(unwrapped):
+                    return unwrapped
+            if isinstance(value, str):
+                try:
+                    return unwrap_possible_json_payload(json.loads(value))
+                except json.JSONDecodeError:
+                    continue
+        if "messages" in payload and isinstance(payload["messages"], list):
+            for item in payload["messages"]:
+                unwrapped = unwrap_possible_json_payload(item)
+                if isinstance(unwrapped, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(unwrapped):
+                    return unwrapped
+    if isinstance(payload, list):
+        for item in payload:
+            unwrapped = unwrap_possible_json_payload(item)
+            if isinstance(unwrapped, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(unwrapped):
+                return unwrapped
+    return payload
+
+
+def parse_judge_output(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("Judge output was empty.")
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        payload = extract_json_object(stripped)
+    payload = unwrap_possible_json_payload(payload)
+    if not isinstance(payload, dict):
+        raise ValueError("Judge output was not a JSON object.")
+    return payload
+
+
+def validate_judgment(payload: dict[str, Any]) -> None:
+    required_top = {
+        "better_matches_pr",
+        "better_overall",
+        "confidence",
+        "scores",
+        "A_vs_pr_differences",
+        "B_vs_pr_differences",
+        "A_vs_B_differences",
+        "notable_strengths",
+        "notable_risks",
+        "summary",
+    }
+    missing = required_top - set(payload)
+    if missing:
+        raise ValueError(f"Judgment missing required fields: {sorted(missing)}")
+    if payload["better_matches_pr"] not in {"A", "B", "tie"}:
+        raise ValueError("better_matches_pr must be A, B, or tie")
+    if payload["better_overall"] not in {"A", "B", "tie"}:
+        raise ValueError("better_overall must be A, B, or tie")
+    if payload["confidence"] not in {"low", "medium", "high"}:
+        raise ValueError("confidence must be low, medium, or high")
+    for label in ("A", "B"):
+        if label not in payload["scores"]:
+            raise ValueError(f"scores missing {label}")
+        for key in ("pr_alignment", "reuse_alignment", "duplication_risk", "test_alignment"):
+            value = payload["scores"][label].get(key)
+            if not isinstance(value, int) or not (1 <= value <= 5):
+                raise ValueError(f"{label}.{key} must be an integer between 1 and 5")
+    for key in ("A_vs_pr_differences", "B_vs_pr_differences", "A_vs_B_differences"):
+        if not isinstance(payload[key], list) or not all(isinstance(item, str) for item in payload[key]):
+            raise ValueError(f"{key} must be a list of strings")
+    for key in ("notable_strengths", "notable_risks"):
+        if not isinstance(payload[key], dict):
+            raise ValueError(f"{key} must be an object")
+        for label in ("A", "B"):
+            value = payload[key].get(label)
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValueError(f"{key}.{label} must be a list of strings")
+    if not isinstance(payload["summary"], str):
+        raise ValueError("summary must be a string")
+
+
+def run_judge_claude(prompt: str, *, cwd: Path, judge_model: str | None) -> dict[str, Any]:
+    require_command("claude")
+    command = [
+        "claude",
+        "-p",
+        "--output-format",
+        "json",
+        "--json-schema",
+        json.dumps(JUDGE_SCHEMA),
+        "--permission-mode",
+        "default",
+        "--tools",
+        "",
+    ]
+    if judge_model:
+        command.extend(["--model", judge_model])
+    command.append(prompt)
+    completed = run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+    )
+    payload = parse_judge_output(completed.stdout)
+    validate_judgment(payload)
+    return payload
+
+
+def run_judge_codex(prompt: str, *, cwd: Path, judge_model: str | None) -> dict[str, Any]:
+    require_command("codex")
+    with tempfile.TemporaryDirectory(prefix="tracegrep-eval-schema-") as tmpdir:
+        schema_path = Path(tmpdir) / "judge_schema.json"
+        output_path = Path(tmpdir) / "judgment_output.json"
+        write_json(schema_path, JUDGE_SCHEMA)
+        command = [
+            "codex",
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--color",
+            "never",
+            "-s",
+            "read-only",
+            "-C",
+            str(cwd),
+            "--output-schema",
+            str(schema_path),
+            "-o",
+            str(output_path),
+        ]
+        if judge_model:
+            command.extend(["--model", judge_model])
+        command.append(prompt)
+        completed = run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+        )
+        if output_path.exists():
+            raw = output_path.read_text()
+        else:
+            raw = completed.stdout
+    payload = parse_judge_output(raw)
+    validate_judgment(payload)
+    return payload
+
+
+def run_judge_agent(
+    judge_agent: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    judge_model: str | None,
+) -> dict[str, Any]:
+    if judge_agent == "claude":
+        return run_judge_claude(prompt, cwd=cwd, judge_model=judge_model)
+    if judge_agent == "codex":
+        return run_judge_codex(prompt, cwd=cwd, judge_model=judge_model)
+    raise SystemExit(f"Unsupported judge agent: {judge_agent}")
+
+
+def normalize_publish_metadata(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def reveal_winner(label: str, blind_manifest: dict[str, Any]) -> str:
+    if label == "tie":
+        return "tie"
+    return blind_manifest["label_to_condition"][label]
+
+
+def condition_scores(judgment: dict[str, Any], blind_manifest: dict[str, Any]) -> dict[str, dict[str, int]]:
+    label_for = blind_manifest["condition_to_label"]
+    return {
+        condition: judgment["scores"][label_for[condition]]
+        for condition in SUPPORTED_CONDITIONS
+    }
+
+
+def condition_list(judgment: dict[str, Any], blind_manifest: dict[str, Any], key: str) -> dict[str, list[str]]:
+    label_for = blind_manifest["condition_to_label"]
+    return {
+        condition: judgment[f"{label_for[condition]}{key}"]
+        for condition in SUPPORTED_CONDITIONS
+    }
+
+
+def condition_nested_list(
+    judgment: dict[str, Any],
+    blind_manifest: dict[str, Any],
+    section: str,
+) -> dict[str, list[str]]:
+    label_for = blind_manifest["condition_to_label"]
+    return {
+        condition: judgment[section][label_for[condition]]
+        for condition in SUPPORTED_CONDITIONS
+    }
+
+
+def markdown_link(label: str, url: str | None) -> str:
+    if not url:
+        return "n/a"
+    return f"[{label}]({url})"
+
+
+def format_bullets(items: list[str]) -> str:
+    if not items:
+        return "- None noted"
+    return "\n".join(f"- {item}" for item in items)
+
+
+def build_report_markdown(
+    *,
+    task: dict[str, Any],
+    evaluated_agent: str,
+    judge_agent: str,
+    eval_id: str,
+    judgment: dict[str, Any],
+    blind_manifest: dict[str, Any],
+    publish_meta: dict[str, Any] | None,
+    report_path: Path | None = None,
+) -> str:
+    scores = condition_scores(judgment, blind_manifest)
+    differences_vs_pr = condition_list(judgment, blind_manifest, "_vs_pr_differences")
+    strengths = condition_nested_list(judgment, blind_manifest, "notable_strengths")
+    risks = condition_nested_list(judgment, blind_manifest, "notable_risks")
+    overall_winner = reveal_winner(judgment["better_overall"], blind_manifest)
+    pr_winner = reveal_winner(judgment["better_matches_pr"], blind_manifest)
+    control_vs_tg = judgment["A_vs_B_differences"]
+    link_section = [
+        "Publishing has not been run yet for this evaluation.",
+        "",
+        "Public branch publishing can contaminate future benchmarks, so publish only after the evaluation is complete.",
+    ]
+    control_branch_link = "n/a"
+    tg_branch_link = "n/a"
+    if publish_meta and publish_meta.get("published") and "branches" in publish_meta:
+        branches = publish_meta["branches"]
+        compares = publish_meta["compare_urls"]
+        control_branch_link = markdown_link("control branch", branches["control"]["url"])
+        tg_branch_link = markdown_link("tg branch", branches["tg"]["url"])
+        link_section = [
+            f"- Fork: {markdown_link(publish_meta['fork']['name_with_owner'], publish_meta['fork']['url'])}",
+            f"- Control: {control_branch_link}",
+            f"- TG: {tg_branch_link}",
+            f"- Control vs pre-fix: {markdown_link('compare', compares.get('control_vs_pre_fix'))}",
+            f"- TG vs pre-fix: {markdown_link('compare', compares.get('tg_vs_pre_fix'))}",
+            f"- Control vs TG: {markdown_link('compare', compares.get('control_vs_tg'))}",
+            "",
+            "Public branch publishing can contaminate future benchmarks, so these links should be generated only after the run is complete.",
+        ]
+
+    report_rel = str(report_path) if report_path else "n/a"
+    mapping_rows = "\n".join(
+        [
+            "| Label | Condition |",
+            "| --- | --- |",
+            f"| A | {blind_manifest['label_to_condition']['A']} |",
+            f"| B | {blind_manifest['label_to_condition']['B']} |",
+        ]
+    )
+    score_rows = "\n".join(
+        [
+            "| Condition | PR Alignment | Reuse Alignment | Duplication Risk | Test Alignment |",
+            "| --- | ---: | ---: | ---: | ---: |",
+            f"| control | {scores['control']['pr_alignment']} | {scores['control']['reuse_alignment']} | {scores['control']['duplication_risk']} | {scores['control']['test_alignment']} |",
+            f"| tg | {scores['tg']['pr_alignment']} | {scores['tg']['reuse_alignment']} | {scores['tg']['duplication_risk']} | {scores['tg']['test_alignment']} |",
+        ]
+    )
+    return textwrap.dedent(
+        f"""\
+        # Benchmark Report: {task['id']}
+
+        ## Task Metadata
+        - Repo: {task['repo']['name']}
+        - Issue: [#{task['issue']['number']}]({task['issue']['url']}) {task['issue']['title']}
+        - Human PR: [#{task['ground_truth']['pr_number']}]({task['ground_truth']['pr_url']})
+        - Evaluated agent: `{evaluated_agent}`
+        - Judge agent: `{judge_agent}`
+        - Eval ID: `{eval_id}`
+        - Report path: `{report_rel}`
+
+        ## Blind Verdict Summary
+        - Better matches the accepted PR: `{pr_winner}`
+        - Better overall: `{overall_winner}`
+        - Judge confidence: `{judgment['confidence']}`
+
+        ## Blind Mapping
+        {mapping_rows}
+
+        ## Score Table
+        {score_rows}
+
+        ## Control vs Human PR
+        ### Key differences
+        {format_bullets(differences_vs_pr['control'])}
+
+        ### Strengths
+        {format_bullets(strengths['control'])}
+
+        ### Risks
+        {format_bullets(risks['control'])}
+
+        ## TG vs Human PR
+        ### Key differences
+        {format_bullets(differences_vs_pr['tg'])}
+
+        ### Strengths
+        {format_bullets(strengths['tg'])}
+
+        ### Risks
+        {format_bullets(risks['tg'])}
+
+        ## Control vs TG
+        {format_bullets(control_vs_tg)}
+
+        ## Published GitHub Links
+        {'\n'.join(link_section)}
+
+        ## Final Summary
+        {judgment['summary']}
+        """
+    ).strip() + "\n"
+
+
+def build_matrix_entry(
+    *,
+    task: dict[str, Any],
+    evaluated_agent: str,
+    judge_agent: str,
+    eval_id: str,
+    judgment: dict[str, Any],
+    blind_manifest: dict[str, Any],
+    publish_meta: dict[str, Any] | None,
+    report_path: Path,
+    root: Path,
+) -> dict[str, Any]:
+    scores = condition_scores(judgment, blind_manifest)
+    branches = publish_meta["branches"] if publish_meta else {}
+    try:
+        report_ref = str(report_path.relative_to(root.parent))
+    except ValueError:
+        report_ref = str(report_path)
+    return {
+        "task_id": task["id"],
+        "evaluated_agent": evaluated_agent,
+        "judge_agent": judge_agent,
+        "eval_id": eval_id,
+        "better_matches_pr": reveal_winner(judgment["better_matches_pr"], blind_manifest),
+        "better_overall": reveal_winner(judgment["better_overall"], blind_manifest),
+        "confidence": judgment["confidence"],
+        "control_pr_alignment": scores["control"]["pr_alignment"],
+        "tg_pr_alignment": scores["tg"]["pr_alignment"],
+        "control_reuse_alignment": scores["control"]["reuse_alignment"],
+        "tg_reuse_alignment": scores["tg"]["reuse_alignment"],
+        "control_duplication_risk": scores["control"]["duplication_risk"],
+        "tg_duplication_risk": scores["tg"]["duplication_risk"],
+        "control_branch_url": branches.get("control", {}).get("url"),
+        "tg_branch_url": branches.get("tg", {}).get("url"),
+        "report_path": report_ref,
+    }
+
+
+def build_matrix_markdown(entries: list[dict[str, Any]]) -> str:
+    lines = [
+        "# Benchmark Matrix",
+        "",
+        "| Task | Agent | Judge | Better vs PR | Better overall | PR align control | PR align tg | Reuse control | Reuse tg | Duplication risk control | Duplication risk tg | Confidence | Control branch | TG branch | Report |",
+        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+    ]
+    for entry in entries:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    entry["task_id"],
+                    entry["evaluated_agent"],
+                    entry["judge_agent"],
+                    entry["better_matches_pr"],
+                    entry["better_overall"],
+                    str(entry["control_pr_alignment"]),
+                    str(entry["tg_pr_alignment"]),
+                    str(entry["control_reuse_alignment"]),
+                    str(entry["tg_reuse_alignment"]),
+                    str(entry["control_duplication_risk"]),
+                    str(entry["tg_duplication_risk"]),
+                    entry["confidence"],
+                    markdown_link("control", entry["control_branch_url"]),
+                    markdown_link("tg", entry["tg_branch_url"]),
+                    entry["report_path"],
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_report_for_eval(
+    *,
+    task: dict[str, Any],
+    evaluated_agent: str,
+    judge_agent: str,
+    root: Path,
+    eval_dir: Path,
+) -> Path:
+    judgment = load_json(eval_dir / "judgment.json")
+    blind_manifest = load_json(eval_dir / "blind_manifest.json")
+    publish_meta = None
+    publish_path = eval_dir / "publish.json"
+    if publish_path.exists():
+        publish_meta = normalize_publish_metadata(load_json(publish_path))
+    report_path = evaluation_report_path(root, task["id"], evaluated_agent, eval_dir.name)
+    report = build_report_markdown(
+        task=task,
+        evaluated_agent=evaluated_agent,
+        judge_agent=judge_agent,
+        eval_id=eval_dir.name,
+        judgment=judgment,
+        blind_manifest=blind_manifest,
+        publish_meta=publish_meta,
+        report_path=report_path,
+    )
+    write_text(report_path, report)
+    return report_path
+
+
+def cmd_judge(
+    tasks: dict[str, dict[str, Any]],
+    task_id: str,
+    root: Path,
+    *,
+    evaluated_agent: str,
+    judge_agent: str,
+    judge_model: str | None,
+    eval_id: str | None,
+    prepare: bool,
+    force: bool,
+) -> int:
+    task = tasks[task_id]
+    if prepare:
+        prepare_task(root, task, force=force)
+    eval_id_value = eval_id or new_eval_id()
+    eval_path = evaluation_dir(root, task_id, evaluated_agent, eval_id_value)
+    if eval_path.exists():
+        raise SystemExit(f"Evaluation {eval_id_value} already exists at {eval_path}")
+    eval_path.mkdir(parents=True, exist_ok=False)
+    snapshot_commits, _ = write_diff_artifacts(
+        task=task,
+        root=root,
+        evaluated_agent=evaluated_agent,
+        eval_dir=eval_path,
+    )
+    blind_manifest = build_blind_manifest(
+        task_id=task_id,
+        evaluated_agent=evaluated_agent,
+        eval_id=eval_id_value,
+        snapshot_commits=snapshot_commits,
+    )
+    write_json(eval_path / "blind_manifest.json", blind_manifest)
+    judge_input = build_judge_input(task, blind_manifest, eval_path)
+    write_json(eval_path / "judge_input.json", judge_input)
+    prompt = build_judge_prompt(judge_input)
+    write_text(eval_path / "judge_prompt.md", prompt)
+    judgment = run_judge_agent(judge_agent, prompt, cwd=eval_path, judge_model=judge_model)
+    judgment["judge_agent"] = judge_agent
+    if judge_model is not None:
+        judgment["judge_model"] = judge_model
+    write_json(eval_path / "judgment.json", judgment)
+    write_json(
+        eval_path / "publish.json",
+        {
+            "published": False,
+            "warning": "Public branch publishing can contaminate future benchmarks. Publish only after evaluation is complete.",
+        },
+    )
+    report_path = render_report_for_eval(
+        task=task,
+        evaluated_agent=evaluated_agent,
+        judge_agent=judge_agent,
+        root=root,
+        eval_dir=eval_path,
+    )
+    print(f"judged {task_id} at {eval_path}")
+    print(f"report: {report_path}")
+    return 0
+
+
+def cmd_judge_all(
+    tasks: dict[str, dict[str, Any]],
+    task_ids: list[str],
+    root: Path,
+    *,
+    evaluated_agent: str,
+    judge_agent: str,
+    judge_model: str | None,
+    prepare: bool,
+    force: bool,
+) -> int:
+    selected = task_ids or list(tasks.keys())
+    for task_id in selected:
+        cmd_judge(
+            tasks,
+            task_id,
+            root,
+            evaluated_agent=evaluated_agent,
+            judge_agent=judge_agent,
+            judge_model=judge_model,
+            eval_id=None,
+            prepare=prepare,
+            force=force,
+        )
+    return 0
+
+
+def ensure_fork_repo(task: dict[str, Any], *, owner: str = DEFAULT_FORK_OWNER) -> dict[str, str]:
+    require_command("gh")
+    repo_name = repo_basename(task)
+    fork_name = f"{owner}/{repo_name}"
+    view = run(
+        ["gh", "repo", "view", fork_name, "--json", "nameWithOwner,url"],
+        capture_output=True,
+        check=False,
+    )
+    if view.returncode != 0:
+        create = run(
+            ["gh", "repo", "fork", task["repo"]["name"], "--clone=false", "--remote=false"],
+            capture_output=True,
+            check=False,
+        )
+        if create.returncode != 0:
+            raise SystemExit(
+                f"Failed to create fork {fork_name} via gh:\n{create.stderr.strip() or create.stdout.strip()}"
+            )
+        view = run(
+            ["gh", "repo", "view", fork_name, "--json", "nameWithOwner,url"],
+            capture_output=True,
+        )
+    data = json.loads(view.stdout)
+    return {
+        "name_with_owner": data["nameWithOwner"],
+        "url": data["url"],
+        "git_url": data["url"].rstrip("/") + ".git",
+    }
+
+
+def ensure_remote(cache_dir: Path, remote_name: str, remote_url: str) -> None:
+    remote = run(["git", "remote", "get-url", remote_name], cwd=cache_dir, capture_output=True, check=False)
+    if remote.returncode == 0:
+        if remote.stdout.strip() != remote_url:
+            run(["git", "remote", "set-url", remote_name, remote_url], cwd=cache_dir)
+        return
+    run(["git", "remote", "add", remote_name, remote_url], cwd=cache_dir)
+
+
+def branch_url(fork_url: str, branch: str) -> str:
+    return f"{fork_url.rstrip('/')}/tree/{quote(branch, safe='/')}"
+
+
+def compare_url(fork_url: str, base: str, head: str) -> str:
+    return f"{fork_url.rstrip('/')}/compare/{quote(base, safe='') }...{quote(head, safe='/:')}"
+
+
+def cmd_publish(
+    tasks: dict[str, dict[str, Any]],
+    task_id: str,
+    root: Path,
+    *,
+    evaluated_agent: str,
+    eval_id: str | None,
+) -> int:
+    task = tasks[task_id]
+    eval_path = resolve_eval_dir(root, task_id, evaluated_agent, eval_id)
+    blind_manifest = load_json(eval_path / "blind_manifest.json")
+    snapshot_commits = blind_manifest["snapshot_commits"]
+    fork = ensure_fork_repo(task)
+    cache_dir = ensure_repo_cache(root, task)
+    remote_name = f"{DEFAULT_FORK_OWNER}-fork"
+    ensure_remote(cache_dir, remote_name, fork["git_url"])
+    branches = branch_names(task_id, evaluated_agent, eval_path.name)
+    for condition in SUPPORTED_CONDITIONS:
+        worktree = worktree_dir(root, task_id, condition)
+        if not worktree.exists():
+            raise SystemExit(f"Worktree missing for {condition}: {worktree}")
+        run(
+            [
+                "git",
+                "push",
+                "--force",
+                remote_name,
+                f"{snapshot_commits[condition]}:refs/heads/{branches[condition]}",
+            ],
+            cwd=worktree,
+        )
+    fork_url = fork["url"]
+    publish_meta = {
+        "published": True,
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        "fork": fork,
+        "upstream_repo": task["repo"]["name"],
+        "ground_truth": task["ground_truth"],
+        "branches": {
+            condition: {
+                "name": branches[condition],
+                "url": branch_url(fork_url, branches[condition]),
+                "commit": snapshot_commits[condition],
+            }
+            for condition in SUPPORTED_CONDITIONS
+        },
+        "compare_urls": {
+            "control_vs_pre_fix": compare_url(
+                fork_url,
+                task["ground_truth"]["pre_fix_commit"],
+                branches["control"],
+            ),
+            "tg_vs_pre_fix": compare_url(
+                fork_url,
+                task["ground_truth"]["pre_fix_commit"],
+                branches["tg"],
+            ),
+            "control_vs_tg": compare_url(
+                fork_url,
+                branches["control"],
+                branches["tg"],
+            ),
+        },
+        "warning": "Public branch publishing can contaminate future benchmarks. These branches should only be created after evaluation is complete.",
+    }
+    write_json(eval_path / "publish.json", publish_meta)
+    judgment = load_json(eval_path / "judgment.json")
+    report_path = render_report_for_eval(
+        task=task,
+        evaluated_agent=evaluated_agent,
+        judge_agent=judgment["judge_agent"],
+        root=root,
+        eval_dir=eval_path,
+    )
+    print(f"published {task_id} evaluation {eval_path.name}")
+    print(f"report: {report_path}")
+    return 0
+
+
+def cmd_publish_all(
+    tasks: dict[str, dict[str, Any]],
+    task_ids: list[str],
+    root: Path,
+    *,
+    evaluated_agent: str,
+) -> int:
+    selected = task_ids or list(tasks.keys())
+    for task_id in selected:
+        cmd_publish(tasks, task_id, root, evaluated_agent=evaluated_agent, eval_id=None)
+    return 0
+
+
+def cmd_report(
+    tasks: dict[str, dict[str, Any]],
+    task_id: str,
+    root: Path,
+    *,
+    evaluated_agent: str,
+    eval_id: str | None,
+) -> int:
+    task = tasks[task_id]
+    eval_path = resolve_eval_dir(root, task_id, evaluated_agent, eval_id)
+    judgment = load_json(eval_path / "judgment.json")
+    report_path = render_report_for_eval(
+        task=task,
+        evaluated_agent=evaluated_agent,
+        judge_agent=judgment["judge_agent"],
+        root=root,
+        eval_dir=eval_path,
+    )
+    print(f"report: {report_path}")
+    return 0
+
+
+def cmd_report_all(
+    tasks: dict[str, dict[str, Any]],
+    task_ids: list[str],
+    root: Path,
+    *,
+    evaluated_agent: str,
+) -> int:
+    selected = task_ids or list(tasks.keys())
+    entries = []
+    for task_id in selected:
+        task = tasks[task_id]
+        eval_path = latest_eval_dir(root, task_id, evaluated_agent)
+        judgment = load_json(eval_path / "judgment.json")
+        report_path = render_report_for_eval(
+            task=task,
+            evaluated_agent=evaluated_agent,
+            judge_agent=judgment["judge_agent"],
+            root=root,
+            eval_dir=eval_path,
+        )
+        blind_manifest = load_json(eval_path / "blind_manifest.json")
+        publish_meta = None
+        publish_path = eval_path / "publish.json"
+        if publish_path.exists():
+            maybe = normalize_publish_metadata(load_json(publish_path))
+            if maybe and maybe.get("published"):
+                publish_meta = maybe
+        entries.append(
+            build_matrix_entry(
+                task=task,
+                evaluated_agent=evaluated_agent,
+                judge_agent=judgment["judge_agent"],
+                eval_id=eval_path.name,
+                judgment=judgment,
+                blind_manifest=blind_manifest,
+                publish_meta=publish_meta,
+                report_path=report_path,
+                root=root,
+            )
+        )
+    reports = reports_dir(root)
+    markdown = build_matrix_markdown(entries)
+    write_text(reports / "matrix.md", markdown)
+    write_json(reports / "matrix.json", {"entries": entries})
+    print(f"matrix: {reports / 'matrix.md'}")
+    return 0
+
+
+def cmd_run_task(
+    tasks: dict[str, dict[str, Any]],
+    task_id: str,
+    root: Path,
+    *,
+    evaluated_agent: str,
+    judge_agent: str,
+    judge_model: str | None,
+    force: bool,
+    extra_args: list[str],
+) -> int:
+    task = tasks[task_id]
+    eval_id = new_eval_id()
+
+    print(f"[1/6] preparing {task_id}")
+    prepare_task(root, task, force=force)
+
+    for index, condition in enumerate(SUPPORTED_CONDITIONS, start=2):
+        print(f"[{index}/6] launching {evaluated_agent} {condition}")
+        result = cmd_launch(
+            tasks,
+            task_id,
+            root,
+            agent=evaluated_agent,
+            condition=condition,
+            prepare=False,
+            force=False,
+            extra_args=extra_args,
+        )
+        if result != 0:
+            print(f"stopping after {condition} launch failed with exit code {result}")
+            return result
+
+    print(f"[4/6] judging {task_id}")
+    result = cmd_judge(
+        tasks,
+        task_id,
+        root,
+        evaluated_agent=evaluated_agent,
+        judge_agent=judge_agent,
+        judge_model=judge_model,
+        eval_id=eval_id,
+        prepare=False,
+        force=False,
+    )
+    if result != 0:
+        return result
+
+    print(f"[5/6] publishing {task_id}")
+    result = cmd_publish(
+        tasks,
+        task_id,
+        root,
+        evaluated_agent=evaluated_agent,
+        eval_id=eval_id,
+    )
+    if result != 0:
+        return result
+
+    print(f"[6/6] refreshing report {task_id}")
+    return cmd_report(
+        tasks,
+        task_id,
+        root,
+        evaluated_agent=evaluated_agent,
+        eval_id=eval_id,
+    )
+
+
 def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Historical benchmark harness for codex/claude CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -432,6 +1687,58 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     )
     launch_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
 
+    judge_parser = subparsers.add_parser("judge", help="Blind-judge one task against the human PR.")
+    judge_parser.add_argument("task_id", choices=task_ids)
+    judge_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    judge_parser.add_argument("--judge-agent", choices=SUPPORTED_AGENTS, default=None)
+    judge_parser.add_argument("--judge-model")
+    judge_parser.add_argument("--eval-id")
+    judge_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    judge_parser.add_argument("--prepare", action="store_true", help="Prepare the task before judging.")
+    judge_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
+
+    judge_all_parser = subparsers.add_parser("judge-all", help="Blind-judge one or more tasks.")
+    judge_all_parser.add_argument("task_ids", nargs="*", choices=task_ids)
+    judge_all_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    judge_all_parser.add_argument("--judge-agent", choices=SUPPORTED_AGENTS, default=None)
+    judge_all_parser.add_argument("--judge-model")
+    judge_all_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    judge_all_parser.add_argument("--prepare", action="store_true", help="Prepare tasks before judging.")
+    judge_all_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
+
+    publish_parser = subparsers.add_parser("publish", help="Publish both condition branches for one evaluation.")
+    publish_parser.add_argument("task_id", choices=task_ids)
+    publish_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    publish_parser.add_argument("--eval-id")
+    publish_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+
+    publish_all_parser = subparsers.add_parser("publish-all", help="Publish the latest evaluation for one or more tasks.")
+    publish_all_parser.add_argument("task_ids", nargs="*", choices=task_ids)
+    publish_all_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    publish_all_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+
+    report_parser = subparsers.add_parser("report", help="Render the markdown report for one evaluation.")
+    report_parser.add_argument("task_id", choices=task_ids)
+    report_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    report_parser.add_argument("--eval-id")
+    report_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+
+    report_all_parser = subparsers.add_parser("report-all", help="Render an aggregate markdown matrix.")
+    report_all_parser.add_argument("task_ids", nargs="*", choices=task_ids)
+    report_all_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    report_all_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+
+    run_task_parser = subparsers.add_parser(
+        "run-task",
+        help="Run the full task flow: prepare, launch control, launch tg, judge, publish, and report.",
+    )
+    run_task_parser.add_argument("task_id", choices=task_ids)
+    run_task_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    run_task_parser.add_argument("--judge-agent", choices=SUPPORTED_AGENTS, default=None)
+    run_task_parser.add_argument("--judge-model")
+    run_task_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    run_task_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
+
     return parser
 
 
@@ -456,6 +1763,72 @@ def main() -> int:
             agent=args.agent,
             condition=args.condition,
             prepare=args.prepare,
+            force=args.force,
+            extra_args=extra_args,
+        )
+    if args.command == "judge":
+        return cmd_judge(
+            tasks,
+            args.task_id,
+            args.root,
+            evaluated_agent=args.agent,
+            judge_agent=args.judge_agent or default_judge_agent(),
+            judge_model=args.judge_model,
+            eval_id=args.eval_id,
+            prepare=args.prepare,
+            force=args.force,
+        )
+    if args.command == "judge-all":
+        return cmd_judge_all(
+            tasks,
+            args.task_ids,
+            args.root,
+            evaluated_agent=args.agent,
+            judge_agent=args.judge_agent or default_judge_agent(),
+            judge_model=args.judge_model,
+            prepare=args.prepare,
+            force=args.force,
+        )
+    if args.command == "publish":
+        return cmd_publish(
+            tasks,
+            args.task_id,
+            args.root,
+            evaluated_agent=args.agent,
+            eval_id=args.eval_id,
+        )
+    if args.command == "publish-all":
+        return cmd_publish_all(
+            tasks,
+            args.task_ids,
+            args.root,
+            evaluated_agent=args.agent,
+        )
+    if args.command == "report":
+        return cmd_report(
+            tasks,
+            args.task_id,
+            args.root,
+            evaluated_agent=args.agent,
+            eval_id=args.eval_id,
+        )
+    if args.command == "report-all":
+        return cmd_report_all(
+            tasks,
+            args.task_ids,
+            args.root,
+            evaluated_agent=args.agent,
+        )
+    if args.command == "run-task":
+        if extra_args and extra_args[0] == "--":
+            extra_args = extra_args[1:]
+        return cmd_run_task(
+            tasks,
+            args.task_id,
+            args.root,
+            evaluated_agent=args.agent,
+            judge_agent=args.judge_agent or default_judge_agent(),
+            judge_model=args.judge_model,
             force=args.force,
             extra_args=extra_args,
         )
