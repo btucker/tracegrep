@@ -370,21 +370,33 @@ fn test_query_shows_before_context_for_subsequent_matches() {
     let dir = create_repo(&[(
         "src/main.rs",
         r#"fn first_match() {}
-fn shared_context() {}
+fn gap_line_1() {}
+fn gap_line_2() {}
 fn second_match() {}
 "#,
     )]);
+    let cache_dir = tempfile::tempdir().unwrap();
 
-    let output = run_tracegrep(dir.path(), &["-C", "1", "first_match|second_match"]);
+    let output = run_tracegrep_with_cache(
+        dir.path(),
+        cache_dir.path(),
+        &["-C", "1", "first_match|second_match"],
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         output.status.success(),
         "stderr: {}",
         String::from_utf8(output.stderr).unwrap()
     );
+    // gap_line_1 is after-context of first_match, gap_line_2 is before-context of second_match.
+    // With a 2-line gap they don't overlap, so both should appear once each.
     assert!(
-        stdout.matches("shared_context()").count() >= 2,
-        "stdout:\n{stdout}"
+        stdout.contains("gap_line_1"),
+        "after-context should appear. stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("gap_line_2"),
+        "before-context should appear. stdout:\n{stdout}"
     );
 }
 
@@ -804,6 +816,38 @@ fn register_6() { sink(target); }
     assert!(
         parsed.get("hidden_references").is_none(),
         "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_query_no_duplicate_context_lines_between_close_matches() {
+    let dir = create_repo(&[(
+        "src/main.rs",
+        r#"fn first_match() {}
+fn shared_context() {}
+fn second_match() {}
+"#,
+    )]);
+    let cache_dir = tempfile::tempdir().unwrap();
+
+    let output = run_tracegrep_with_cache(
+        dir.path(),
+        cache_dir.path(),
+        &["--color=never", "-C", "1", "first_match|second_match"],
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    // shared_context is after-context of first_match AND before-context of second_match.
+    // It should appear exactly once in the output (in the first block's after-context),
+    // not duplicated across both blocks.
+    let count = stdout.lines().filter(|l| l.contains("shared_context")).count();
+    assert_eq!(
+        count, 1,
+        "shared_context should appear exactly once, but appeared {count} times.\nstdout:\n{stdout}"
     );
 }
 
