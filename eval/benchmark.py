@@ -463,7 +463,7 @@ def configure_condition_environment(worktree: Path, condition: str) -> None:
     tg_binary_path = local_tg_path(worktree)
     cache_root = local_cache_root(worktree)
 
-    write_worktree_gitignore(worktree)
+    write_worktree_excludes(worktree)
 
     if condition == "tg":
         if not TRACEGREP_SKILL_SOURCE.exists():
@@ -486,10 +486,43 @@ def configure_condition_environment(worktree: Path, condition: str) -> None:
     remove_tree(cache_root)
 
 
-def write_worktree_gitignore(worktree: Path) -> None:
-    lines = [f"{d}/" for d in WORKTREE_SNAPSHOT_EXCLUDES]
-    lines.append(".gitignore")
-    (worktree / ".gitignore").write_text("\n".join(lines) + "\n")
+_EXCLUDE_BEGIN = "# BEGIN tracegrep eval excludes"
+_EXCLUDE_END = "# END tracegrep eval excludes"
+
+
+def write_worktree_excludes(worktree: Path) -> None:
+    git_dir = Path(
+        run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=worktree,
+            capture_output=True,
+        ).stdout.strip()
+    )
+    if not git_dir.is_absolute():
+        git_dir = worktree / git_dir
+    info_dir = git_dir / "info"
+    info_dir.mkdir(parents=True, exist_ok=True)
+    exclude_file = info_dir / "exclude"
+
+    section_lines = [f"{d}/" for d in WORKTREE_SNAPSHOT_EXCLUDES]
+    new_section = (
+        f"{_EXCLUDE_BEGIN}\n" + "\n".join(section_lines) + f"\n{_EXCLUDE_END}\n"
+    )
+
+    if exclude_file.exists():
+        existing = exclude_file.read_text()
+        # Replace existing section if present, otherwise append
+        begin_idx = existing.find(_EXCLUDE_BEGIN)
+        end_idx = existing.find(_EXCLUDE_END)
+        if begin_idx != -1 and end_idx != -1:
+            end_idx = existing.index("\n", end_idx) + 1
+            updated = existing[:begin_idx] + new_section + existing[end_idx:]
+        else:
+            separator = "" if existing.endswith("\n") or not existing else "\n"
+            updated = existing + separator + new_section
+        exclude_file.write_text(updated)
+    else:
+        exclude_file.write_text(new_section)
 
 
 def condition_search_guidance(condition: str) -> str:
