@@ -227,6 +227,24 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertTrue(branches["tg"].endswith("/tg"))
         self.assertNotIn("demo-task", branches["control"])
 
+    def test_host_codex_launcher_keeps_full_auto(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspaces"
+            script = benchmark.build_launcher_script(self.task, root, "codex", "control", "host")
+        self.assertIn("codex --full-auto", script)
+        self.assertNotIn("docker run", script)
+
+    def test_docker_launchers_use_dangerous_flags_inside_container(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspaces"
+            codex_script = benchmark.build_launcher_script(self.task, root, "codex", "tg", "docker")
+            claude_script = benchmark.build_launcher_script(self.task, root, "claude", "tg", "docker")
+        self.assertIn('exec docker "${DOCKER_ARGS[@]}" "$IMAGE"', codex_script)
+        self.assertIn("codex --dangerously-bypass-approvals-and-sandbox", codex_script)
+        self.assertIn("claude --dangerously-skip-permissions", claude_script)
+        self.assertIn("claude plugin list --json", claude_script)
+        self.assertIn("TRACEGREP_CACHE_DIR=/workspace/.tracegrep-cache", codex_script)
+
     def test_diff_summary_parsers(self) -> None:
         numstat = "10\t2\tsrc/file.ts\n-\t-\tbinary.dat\n"
         status = "M\tsrc/file.ts\nA\tbinary.dat\n"
@@ -417,6 +435,11 @@ class BenchmarkCliSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("publish", result.stdout)
 
+    def test_container_build_help(self) -> None:
+        result = self.run_help("container-build")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("container-build", result.stdout)
+
     def test_report_help(self) -> None:
         result = self.run_help("report")
         self.assertEqual(result.returncode, 0)
@@ -427,6 +450,7 @@ class BenchmarkCliSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("run-task", result.stdout)
         self.assertIn("--judge-model", result.stdout)
+        self.assertIn("--runtime", result.stdout)
 
     def test_discover_help(self) -> None:
         result = self.run_help("discover")

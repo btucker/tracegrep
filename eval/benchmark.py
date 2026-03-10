@@ -22,12 +22,14 @@ from urllib.parse import quote, urlencode
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
 TASKS_PATH = SCRIPT_DIR / "tasks.json"
 DEFAULT_ROOT = SCRIPT_DIR / "workspaces"
 DEFAULT_FORK_OWNER = "btucker"
 DEFAULT_JUDGE_AGENT = "claude"
 SUPPORTED_AGENTS = ("codex", "claude")
 SUPPORTED_CONDITIONS = ("control", "tg")
+SUPPORTED_RUNTIMES = ("host", "docker")
 DISCOVERY_LANGUAGES = ("JavaScript", "Python", "Rust", "TypeScript")
 DISCOVERY_KIND_VALUES = ("bug", "feature")
 DEFAULT_DISCOVERY_MIN_STARS = 2000
@@ -40,6 +42,8 @@ DEFAULT_DISCOVERY_CUTOFF_DAYS = 183
 TRACEGREP_SKILL_SOURCE = SCRIPT_DIR.parent / "skills" / "tracegrep"
 BENCHMARK_EXPORT_NAME = "tracegrep-eval"
 BENCHMARK_EXPORT_EMAIL = "tracegrep-eval@example.com"
+DEFAULT_DOCKER_IMAGE = "tracegrep-eval-devcontainer:latest"
+DEFAULT_DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
 
 JUDGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -259,8 +263,9 @@ def worktree_dir(root: Path, task_id: str, condition: str) -> Path:
     return run_dir(root, task_id) / "worktrees" / condition
 
 
-def launch_script_path(root: Path, task_id: str, agent: str, condition: str) -> Path:
-    return run_dir(root, task_id) / f"launch_{agent}_{condition}.sh"
+def launch_script_path(root: Path, task_id: str, agent: str, condition: str, runtime: str = "host") -> Path:
+    suffix = "" if runtime == "host" else f"_{runtime}"
+    return run_dir(root, task_id) / f"launch_{agent}_{condition}{suffix}.sh"
 
 
 def evaluations_root(root: Path, task_id: str, agent: str) -> Path:
@@ -289,6 +294,10 @@ def local_tg_path(worktree: Path) -> Path:
 
 def local_cache_root(worktree: Path) -> Path:
     return worktree / ".tracegrep-cache"
+
+
+def default_docker_image() -> str:
+    return os.environ.get("TRACEGREP_EVAL_DOCKER_IMAGE", DEFAULT_DOCKER_IMAGE)
 
 
 def run(
@@ -486,10 +495,12 @@ def build_run_readme(task: dict[str, Any], root: Path) -> str:
         "",
         "Launchers:",
     ]
-    for agent in SUPPORTED_AGENTS:
-        for condition in SUPPORTED_CONDITIONS:
-            script = launch_script_path(root, task["id"], agent, condition)
-            lines.append(f"- {script.name}")
+    for runtime in SUPPORTED_RUNTIMES:
+        lines.append(f"- Runtime: {runtime}")
+        for agent in SUPPORTED_AGENTS:
+            for condition in SUPPORTED_CONDITIONS:
+                script = launch_script_path(root, task["id"], agent, condition, runtime)
+                lines.append(f"  - {script.name}")
     lines.extend(
         [
             "",
@@ -504,8 +515,13 @@ def build_run_readme(task: dict[str, Any], root: Path) -> str:
             "tg condition environment additions:",
             "- `.codex/skills/tracegrep/` copied from this repo",
             "- `.claude/settings.local.json` enabling `tracegrep@tracegrep-dev`",
-            "- `.eval-bin/tg` copied from the host `tg` binary so the workspace sandbox can execute it",
+            "- `.eval-bin/tg` copied from the host `tg` binary so the host runtime can execute it inside the workspace sandbox",
             "- `.tracegrep-cache/` used via `TRACEGREP_CACHE_DIR` to keep cache writes inside the worktree",
+            "",
+            "Docker runtime additions:",
+            f"- Image tag defaults to `{default_docker_image()}` and can be overridden with `TRACEGREP_EVAL_DOCKER_IMAGE`",
+            "- Claude state mounts default to `~/.claude` and `~/.claude.json`; Codex state mounts default to `~/.codex`",
+            "- Docker launchers mount only the prepared worktree plus the prompt file, then run the agent with dangerous-mode flags inside the container boundary",
             "",
             "Evaluation flow:",
             "- `judge` creates blind comparison artifacts under `evaluations/<agent>/<eval-id>/`",
@@ -516,7 +532,46 @@ def build_run_readme(task: dict[str, Any], root: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_launcher_script(task: dict[str, Any], root: Path, agent: str, condition: str) -> str:
+def shell_literal(value: str) -> str:
+    return shlex.quote(value)
+
+
+def container_agent_state_mounts(agent: str) -> list[tuple[str, str, bool]]:
+    home = Path.home()
+    if agent == "claude":
+        return [
+            ("TRACEGREP_EVAL_CLAUDE_HOME", str(home / ".claude"), "/home/node/.claude", False),
+            ("TRACEGREP_EVAL_CLAUDE_JSON", str(home / ".claude.json"), "/home/node/.claude.json", True),
+        ]
+    if agent == "codex":
+        return [
+            ("TRACEGREP_EVAL_CODEX_HOME", str(home / ".codex"), "/home/node/.codex", False),
+        ]
+    raise ValueError(f"unsupported agent: {agent}")
+
+
+def container_agent_env_vars(agent: str) -> list[str]:
+    if agent == "claude":
+        return [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        ]
+    if agent == "codex":
+        return [
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_ORG_ID",
+            "OPENAI_PROJECT_ID",
+        ]
+    raise ValueError(f"unsupported agent: {agent}")
+
+
+def build_host_launcher_script(task: dict[str, Any], root: Path, agent: str, condition: str) -> str:
     base = run_dir(root, task["id"])
     prompt_file = base / "prompts" / f"{condition}.md"
     worktree = base / "worktrees" / condition
@@ -582,6 +637,120 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
     return "\n".join(lines) + "\n"
 
 
+def build_docker_launcher_script(task: dict[str, Any], root: Path, agent: str, condition: str) -> str:
+    base = run_dir(root, task["id"])
+    prompt_file = base / "prompts" / f"{condition}.md"
+    worktree = base / "worktrees" / condition
+    if agent == "codex":
+        agent_command = 'exec codex --dangerously-bypass-approvals-and-sandbox "$@" "$(cat /tmp/tracegrep-prompt.md)"'
+    elif agent == "claude":
+        agent_command = 'exec claude --dangerously-skip-permissions "$@" "$(cat /tmp/tracegrep-prompt.md)"'
+    else:
+        raise ValueError(f"unsupported agent: {agent}")
+
+    preflight_lines: list[str] = []
+    warmup_lines: list[str] = []
+    if condition == "tg":
+        warmup_lines = [
+            'echo "Prebuilding tracegrep index in /workspace..."',
+            "tg --build-index",
+        ]
+    if agent == "claude" and condition == "tg":
+        preflight_lines = [
+            'PLUGIN_ID="tracegrep@tracegrep-dev"',
+            "if ! claude plugin list --json | python3 -c '",
+            "import json",
+            "import sys",
+            "",
+            "plugin_id = sys.argv[1]",
+            "plugins = json.load(sys.stdin)",
+            'installed = any(plugin.get(\"id\") == plugin_id for plugin in plugins)',
+            "sys.exit(0 if installed else 1)",
+            '\' "$PLUGIN_ID"; then',
+            '  echo "Required Claude plugin not installed: $PLUGIN_ID" >&2',
+            '  echo "Install it in the mounted Claude state before rerunning:" >&2',
+            '  echo "  claude plugin install $PLUGIN_ID" >&2',
+            "  exit 1",
+            "fi",
+        ]
+
+    container_lines = [
+        "set -euo pipefail",
+        "cd /workspace",
+        "export TRACEGREP_CACHE_DIR=/workspace/.tracegrep-cache",
+    ]
+    if preflight_lines:
+        container_lines.extend(preflight_lines)
+    if warmup_lines:
+        container_lines.extend(warmup_lines)
+    container_lines.append(agent_command)
+    container_script = "\n".join(container_lines)
+
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        f'WORKTREE={shell_literal(str(worktree))}',
+        f'PROMPT_FILE={shell_literal(str(prompt_file))}',
+        f'IMAGE="${{TRACEGREP_EVAL_DOCKER_IMAGE:-{default_docker_image()}}}"',
+        'DOCKER_ARGS=(run --rm)',
+        'if [[ -t 0 && -t 1 ]]; then',
+        '  DOCKER_ARGS+=(-it)',
+        "fi",
+        'DOCKER_ARGS+=(',
+        '  -w /workspace',
+        '  -v "$WORKTREE:/workspace"',
+        '  -v "$PROMPT_FILE:/tmp/tracegrep-prompt.md:ro"',
+        '  -e TRACEGREP_CACHE_DIR=/workspace/.tracegrep-cache',
+        ')',
+        "",
+    ]
+    for env_name, host_default, container_path, is_file in container_agent_state_mounts(agent):
+        kind_check = "-f" if is_file else "-d"
+        lines.extend(
+            [
+                f'HOST_PATH="${{{env_name}:-{host_default}}}"',
+                f'if [[ {kind_check} "$HOST_PATH" ]]; then',
+                f'  DOCKER_ARGS+=(-v "$HOST_PATH:{container_path}")',
+                "fi",
+                "",
+            ]
+        )
+    for env_name in container_agent_env_vars(agent):
+        lines.extend(
+            [
+                f'if [[ -n "${{{env_name}:-}}" ]]; then',
+                f'  DOCKER_ARGS+=(-e {env_name})',
+                "fi",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            'read -r -d "" CONTAINER_SCRIPT <<\'EOF\' || true',
+            container_script,
+            "EOF",
+            "",
+            'exec docker "${DOCKER_ARGS[@]}" "$IMAGE" bash -lc "$CONTAINER_SCRIPT" bash "$@"',
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def build_launcher_script(
+    task: dict[str, Any],
+    root: Path,
+    agent: str,
+    condition: str,
+    runtime: str,
+) -> str:
+    if runtime == "host":
+        return build_host_launcher_script(task, root, agent, condition)
+    if runtime == "docker":
+        return build_docker_launcher_script(task, root, agent, condition)
+    raise ValueError(f"unsupported runtime: {runtime}")
+
+
 def prepare_task(root: Path, task: dict[str, Any], *, force: bool) -> None:
     ensure_root(root)
     base = run_dir(root, task["id"])
@@ -604,11 +773,12 @@ def prepare_task(root: Path, task: dict[str, Any], *, force: bool) -> None:
     write_json(base / "hidden" / "ground_truth.json", hidden_payload)
     (base / "README.md").write_text(build_run_readme(task, root))
 
-    for agent in SUPPORTED_AGENTS:
-        for condition in SUPPORTED_CONDITIONS:
-            script_path = launch_script_path(root, task["id"], agent, condition)
-            script_path.write_text(build_launcher_script(task, root, agent, condition))
-            os.chmod(script_path, 0o755)
+    for runtime in SUPPORTED_RUNTIMES:
+        for agent in SUPPORTED_AGENTS:
+            for condition in SUPPORTED_CONDITIONS:
+                script_path = launch_script_path(root, task["id"], agent, condition, runtime)
+                script_path.write_text(build_launcher_script(task, root, agent, condition, runtime))
+                os.chmod(script_path, 0o755)
 
 
 def cmd_list(tasks: dict[str, dict[str, Any]]) -> int:
@@ -730,6 +900,19 @@ def cmd_discover(
     return 0
 
 
+def cmd_container_build(*, image: str, dockerfile: Path, no_cache: bool) -> int:
+    require_command("docker")
+    if not dockerfile.exists():
+        raise SystemExit(f"Dockerfile not found: {dockerfile}")
+    command = ["docker", "build", "-f", str(dockerfile), "-t", image]
+    if no_cache:
+        command.append("--no-cache")
+    command.append(str(REPO_ROOT))
+    print("building:", " ".join(shlex.quote(part) for part in command))
+    completed = subprocess.run(command)
+    return completed.returncode
+
+
 def cmd_launch(
     tasks: dict[str, dict[str, Any]],
     task_id: str,
@@ -737,6 +920,7 @@ def cmd_launch(
     *,
     agent: str,
     condition: str,
+    runtime: str,
     prepare: bool,
     force: bool,
     extra_args: list[str],
@@ -744,7 +928,9 @@ def cmd_launch(
     task = tasks[task_id]
     if prepare:
         prepare_task(root, task, force=force)
-    script = launch_script_path(root, task_id, agent, condition)
+    if runtime == "docker":
+        require_command("docker")
+    script = launch_script_path(root, task_id, agent, condition, runtime)
     if not script.exists():
         raise SystemExit(
             f"{script} does not exist. Run `uv run eval/benchmark.py prepare {task_id}` first."
@@ -2284,6 +2470,7 @@ def cmd_run_task(
     evaluated_agent: str,
     judge_agent: str,
     judge_model: str | None,
+    runtime: str,
     force: bool,
     extra_args: list[str],
 ) -> int:
@@ -2301,6 +2488,7 @@ def cmd_run_task(
             root,
             agent=evaluated_agent,
             condition=condition,
+            runtime=runtime,
             prepare=False,
             force=False,
             extra_args=extra_args,
@@ -2382,10 +2570,19 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     prepare_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     prepare_parser.add_argument("--force", action="store_true", help="Recreate existing generated worktrees.")
 
+    container_build_parser = subparsers.add_parser(
+        "container-build",
+        help="Build the docker image used for containerized implementation runs.",
+    )
+    container_build_parser.add_argument("--image", default=default_docker_image())
+    container_build_parser.add_argument("--dockerfile", type=Path, default=DEFAULT_DOCKERFILE)
+    container_build_parser.add_argument("--no-cache", action="store_true")
+
     launch_parser = subparsers.add_parser("launch", help="Launch a prepared task in codex or claude.")
     launch_parser.add_argument("task_id", choices=task_ids)
     launch_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
     launch_parser.add_argument("--condition", required=True, choices=SUPPORTED_CONDITIONS)
+    launch_parser.add_argument("--runtime", choices=SUPPORTED_RUNTIMES, default="host")
     launch_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     launch_parser.add_argument(
         "--prepare",
@@ -2443,6 +2640,7 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     run_task_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
     run_task_parser.add_argument("--judge-agent", choices=SUPPORTED_AGENTS, default=None)
     run_task_parser.add_argument("--judge-model")
+    run_task_parser.add_argument("--runtime", choices=SUPPORTED_RUNTIMES, default="host")
     run_task_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     run_task_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
 
@@ -2474,6 +2672,12 @@ def main() -> int:
         )
     if args.command == "prepare":
         return cmd_prepare(tasks, args.task_ids, args.root, args.force)
+    if args.command == "container-build":
+        return cmd_container_build(
+            image=args.image,
+            dockerfile=args.dockerfile,
+            no_cache=args.no_cache,
+        )
     if args.command == "launch":
         if extra_args and extra_args[0] == "--":
             extra_args = extra_args[1:]
@@ -2483,6 +2687,7 @@ def main() -> int:
             args.root,
             agent=args.agent,
             condition=args.condition,
+            runtime=args.runtime,
             prepare=args.prepare,
             force=args.force,
             extra_args=extra_args,
@@ -2550,6 +2755,7 @@ def main() -> int:
             evaluated_agent=args.agent,
             judge_agent=args.judge_agent or default_judge_agent(),
             judge_model=args.judge_model,
+            runtime=args.runtime,
             force=args.force,
             extra_args=extra_args,
         )

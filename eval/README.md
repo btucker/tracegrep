@@ -14,6 +14,7 @@ The claim this harness is built to test is:
 - writes redacted task prompts that hide the accepted PR
 - injects tracegrep agent integration only into the `tg` condition
 - generates launcher scripts for both `codex` and `claude`
+- can run the implementation phase on the host or inside a devcontainer-style Docker image
 - creates blind diff artifacts for `control` and `tg`
 - runs an LLM judge against the human PR diff
 - optionally publishes both branches to GitHub forks under `btucker`
@@ -46,16 +47,24 @@ Prepare one task:
 uv run eval/benchmark.py prepare storybook-hide-toolbar-docs
 ```
 
+Build the Docker image used for containerized implementation runs:
+
+```bash
+uv run eval/benchmark.py container-build
+```
+
 Launch a prepared run with Codex:
 
 ```bash
 uv run eval/benchmark.py launch storybook-hide-toolbar-docs --agent codex --condition tg
+uv run eval/benchmark.py launch storybook-hide-toolbar-docs --agent codex --condition tg --runtime docker
 ```
 
 Launch a prepared run with Claude:
 
 ```bash
 uv run eval/benchmark.py launch storybook-hide-toolbar-docs --agent claude --condition control
+uv run eval/benchmark.py launch storybook-hide-toolbar-docs --agent claude --condition tg --runtime docker
 ```
 
 Judge one task after the agent runs finish:
@@ -69,6 +78,7 @@ Run the full task flow with one command:
 
 ```bash
 uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent codex
+uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent codex --runtime docker
 uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent claude --judge-agent codex --judge-model gpt-5 -- --model sonnet
 ```
 
@@ -98,6 +108,12 @@ Model selection notes:
 - `--judge-model` applies only to the blind judge run.
 - If `--judge-model` is omitted, the judge CLI uses its default model.
 
+Runtime notes:
+
+- `--runtime host` keeps the existing launcher behavior.
+- `--runtime docker` runs only the implementation phases inside the `.devcontainer` image; `judge`, `publish`, and `report` still run on the host.
+- Docker runtime defaults to image tag `tracegrep-eval-devcontainer:latest`. Override it with `TRACEGREP_EVAL_DOCKER_IMAGE`.
+
 ## Output layout
 
 Preparing a task creates:
@@ -105,7 +121,8 @@ Preparing a task creates:
 - `eval/workspaces/cache/<repo>/` shared upstream clone
 - `eval/workspaces/runs/<task>/worktrees/<condition>/` detached repo snapshot
 - `eval/workspaces/runs/<task>/prompts/<condition>.md` agent prompt
-- `eval/workspaces/runs/<task>/launch_<agent>_<condition>.sh` launcher script
+- `eval/workspaces/runs/<task>/launch_<agent>_<condition>.sh` host launcher script
+- `eval/workspaces/runs/<task>/launch_<agent>_<condition>_docker.sh` docker launcher script
 - `eval/workspaces/runs/<task>/hidden/ground_truth.json` accepted PR metadata for evaluation
 
 Discovery creates:
@@ -144,6 +161,15 @@ For the `tg` worktree only, `prepare` also creates:
 - the generated Claude `tg` launcher checks `claude plugin list --json` and fails fast if `tracegrep@tracegrep-dev` is not installed
 - the generated `tg` launchers run `tg --build-index` from inside the prepared worktree before handing control to the agent
 
+Container runtime details:
+
+- The repo includes a root `.devcontainer/` with the shared image definition used by dockerized build runs.
+- The image installs `claude`, `codex`, `tg`, `rg`, `gh`, and `uv`.
+- Docker launchers mount only the prepared worktree plus the prompt file.
+- Docker launchers mount agent state from `~/.claude`, `~/.claude.json`, and `~/.codex` by default. Override those host paths with `TRACEGREP_EVAL_CLAUDE_HOME`, `TRACEGREP_EVAL_CLAUDE_JSON`, and `TRACEGREP_EVAL_CODEX_HOME`.
+- Docker launchers pass through common API environment variables when present.
+- Inside docker, Claude runs with `--dangerously-skip-permissions` and Codex runs with `--dangerously-bypass-approvals-and-sandbox`, so the container rather than the agent CLI becomes the main permission boundary.
+
 ## Notes
 
 - The prompts tell agents not to browse the web or inspect PR history.
@@ -151,6 +177,7 @@ For the `tg` worktree only, `prepare` also creates:
 - The `tg` prompt explicitly prefers `tg`/`tracegrep` for supported source files.
 - The benchmark is about agent use of `tg`, so the `tg` condition includes the agent-specific skill/plugin wiring needed to expose it naturally.
 - The generated launchers prepend `.eval-bin/` to `PATH` and set `TRACEGREP_CACHE_DIR` to `.tracegrep-cache/` so `tg` stays usable inside the workspace sandbox.
+- The docker launchers use the Linux `tg` installed in the container image rather than the host-copied `.eval-bin/tg`, because host binaries are not portable across container OS boundaries.
 - The generated `tg` launchers also prewarm the repo index inside the worktree, so the first agent search is less dominated by cold graph construction.
 - The `control` worktree does not get the Codex skill or Claude plugin config.
 - For tasks where the original issue contained solution leakage, the manifest uses a redacted benchmark prompt instead.
@@ -163,3 +190,4 @@ For the `tg` worktree only, `prepare` also creates:
 - `discover` uses GitHub search plus a structured `codex` or `claude` pass to shortlist issue/PR pairs for future benchmark additions.
 - `discover` filters to MIT-licensed public repos, skips repos already present in `tasks.json`, and currently limits the pool to tracegrep-supported primary languages (`JavaScript`, `TypeScript`, `Python`, `Rust`).
 - The default discovery recency gate is PR merged on or after six months before the run date. Override `--pr-cutoff YYYY-MM-DD` if you want a stricter or looser approximation of training-data freshness.
+- The current docker runtime is a practical first cut. It improves isolation substantially, but it does not yet reproduce Anthropic's full reference firewall rules from the Claude devcontainer docs.
