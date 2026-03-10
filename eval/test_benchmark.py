@@ -6,8 +6,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
+from pathlib import Path
 
 
 def load_benchmark_module():
@@ -96,115 +96,6 @@ class BenchmarkHarnessTests(unittest.TestCase):
             "snapshot_commits": {"tg": "feedface", "control": "deadbeef"},
         }
 
-    def example_discovery_pool(self) -> list[dict]:
-        return [
-            {
-                "repo": {
-                    "name": "acme/alpha",
-                    "url": "https://github.com/acme/alpha",
-                    "git_url": "https://github.com/acme/alpha.git",
-                    "description": "Large TypeScript app",
-                    "language": "TypeScript",
-                    "license": "MIT",
-                    "stars": 12000,
-                    "size_kb": 48000,
-                },
-                "issue": {
-                    "number": 101,
-                    "url": "https://github.com/acme/alpha/issues/101",
-                    "title": "Add configurable workspace base path",
-                    "author": "issue-author",
-                    "created_at": "2026-01-01T00:00:00Z",
-                    "closed_at": "2026-02-01T00:00:00Z",
-                    "labels": ["enhancement"],
-                    "body_excerpt": "Allow callers to configure the workspace base path.",
-                },
-                "pr": {
-                    "number": 202,
-                    "url": "https://github.com/acme/alpha/pull/202",
-                    "title": "Add configurable workspace base path",
-                    "author": "pr-author",
-                    "merged_at": "2026-02-01T00:00:00Z",
-                    "merge_commit": "deadbeef",
-                    "pre_fix_commit": "cafebabe",
-                    "changed_files": 7,
-                    "additions": 120,
-                    "deletions": 20,
-                },
-                "kind_hint": "feature",
-            },
-            {
-                "repo": {
-                    "name": "acme/beta",
-                    "url": "https://github.com/acme/beta",
-                    "git_url": "https://github.com/acme/beta.git",
-                    "description": "Large Rust service",
-                    "language": "Rust",
-                    "license": "MIT",
-                    "stars": 9500,
-                    "size_kb": 36000,
-                },
-                "issue": {
-                    "number": 303,
-                    "url": "https://github.com/acme/beta/issues/303",
-                    "title": "Crash when cache index is empty",
-                    "author": "reporter",
-                    "created_at": "2025-07-01T00:00:00Z",
-                    "closed_at": "2026-01-15T00:00:00Z",
-                    "labels": ["bug"],
-                    "body_excerpt": "The cache loader panics on empty state.",
-                },
-                "pr": {
-                    "number": 404,
-                    "url": "https://github.com/acme/beta/pull/404",
-                    "title": "Fix cache loader panic",
-                    "author": "fixer",
-                    "merged_at": "2026-01-15T00:00:00Z",
-                    "merge_commit": "facefeed",
-                    "pre_fix_commit": "beadfeed",
-                    "changed_files": 3,
-                    "additions": 40,
-                    "deletions": 8,
-                },
-                "kind_hint": "bug",
-            },
-        ]
-
-    def example_discovery_selection(self) -> dict:
-        return {
-            "summary": "Good mix of one feature and one bug in large repos.",
-            "candidates": [
-                {
-                    "repo_name": "acme/alpha",
-                    "issue_number": 101,
-                    "pr_number": 202,
-                    "kind": "feature",
-                    "fit_score": 5,
-                    "rationale": "Touches existing workspace plumbing without being trivial.",
-                    "prompt_title": "Add a configurable workspace base path",
-                    "prompt_body": "Add support for configuring a workspace base path and update related tests and docs.",
-                    "evaluation_focus": [
-                        "Did the implementation reuse the existing workspace path pipeline?",
-                        "Did it update tests and docs coherently?",
-                    ],
-                },
-                {
-                    "repo_name": "acme/beta",
-                    "issue_number": 303,
-                    "pr_number": 404,
-                    "kind": "bug",
-                    "fit_score": 4,
-                    "rationale": "Requires navigating the cache/index path in a non-trivial service.",
-                    "prompt_title": "Fix the empty-cache loader panic",
-                    "prompt_body": "Fix the cache loader so an empty cache index no longer crashes, and update tests as needed.",
-                    "evaluation_focus": [
-                        "Did the implementation fit the existing cache-loading path cleanly?",
-                        "Did it cover the empty-cache regression in tests?",
-                    ],
-                },
-            ],
-        }
-
     def test_blind_manifest_is_deterministic(self) -> None:
         first = benchmark.build_blind_manifest(
             task_id="demo-task",
@@ -226,24 +117,6 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertTrue(branches["control"].endswith("/control"))
         self.assertTrue(branches["tg"].endswith("/tg"))
         self.assertNotIn("demo-task", branches["control"])
-
-    def test_host_codex_launcher_keeps_full_auto(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "workspaces"
-            script = benchmark.build_launcher_script(self.task, root, "codex", "control", "host")
-        self.assertIn("codex --full-auto", script)
-        self.assertNotIn("docker run", script)
-
-    def test_docker_launchers_use_dangerous_flags_inside_container(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "workspaces"
-            codex_script = benchmark.build_launcher_script(self.task, root, "codex", "tg", "docker")
-            claude_script = benchmark.build_launcher_script(self.task, root, "claude", "tg", "docker")
-        self.assertIn('exec docker "${DOCKER_ARGS[@]}" "$IMAGE"', codex_script)
-        self.assertIn("codex --dangerously-bypass-approvals-and-sandbox", codex_script)
-        self.assertIn("claude --dangerously-skip-permissions", claude_script)
-        self.assertIn("claude plugin list --json", claude_script)
-        self.assertIn("TRACEGREP_CACHE_DIR=/workspace/.tracegrep-cache", codex_script)
 
     def test_diff_summary_parsers(self) -> None:
         numstat = "10\t2\tsrc/file.ts\n-\t-\tbinary.dat\n"
@@ -329,90 +202,54 @@ class BenchmarkHarnessTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             benchmark.validate_judgment(payload)
 
-    def test_validate_discovery_selection_requires_bug_feature_mix(self) -> None:
-        selection = self.example_discovery_selection()
-        selection["candidates"] = [selection["candidates"][0]]
-        with self.assertRaises(ValueError):
-            benchmark.validate_discovery_selection(
-                selection,
-                self.example_discovery_pool(),
-                candidate_count=4,
-            )
+    def test_forwarded_build_args_injects_agent_model(self) -> None:
+        self.assertEqual(
+            benchmark.forwarded_build_args(["--permission-mode", "acceptEdits"], "sonnet"),
+            ["--model", "sonnet", "--permission-mode", "acceptEdits"],
+        )
 
-    def test_cmd_discover_writes_shortlist_artifacts(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "workspaces"
-            with mock.patch.object(
-                benchmark,
-                "collect_discovery_pool",
-                return_value=self.example_discovery_pool(),
-            ), mock.patch.object(
-                benchmark,
-                "run_discovery_agent",
-                return_value=self.example_discovery_selection(),
-            ):
-                exit_code = benchmark.cmd_discover(
-                    {"demo-task": self.task},
-                    root,
-                    agent="codex",
-                    model="gpt-5",
-                    pr_cutoff=benchmark.parse_cli_date("2025-09-10"),
-                    repo_limit=6,
-                    prs_per_repo=8,
-                    pool_size=10,
-                    candidate_count=4,
-                    min_stars=2000,
-                    min_size_kb=5000,
-                )
-            self.assertEqual(exit_code, 0)
-            discovery_root = root / "discovery"
-            entries = list(discovery_root.iterdir())
-            self.assertEqual(len(entries), 1)
-            shortlist = json.loads((entries[0] / "shortlist.json").read_text())
-            self.assertEqual(shortlist["pr_cutoff"], "2025-09-10")
-            self.assertEqual(len(shortlist["candidates"]), 2)
-            self.assertTrue((entries[0] / "report.md").exists())
+    def test_forwarded_build_args_rejects_conflicting_model_flags(self) -> None:
+        with self.assertRaises(SystemExit):
+            benchmark.forwarded_build_args(["--model", "gpt-5"], "sonnet")
 
-    def test_collect_discovery_pool_skips_existing_issue_pr_but_allows_same_repo(self) -> None:
-        existing_task = self.task | {
-            "repo": self.task["repo"] | {"name": "acme/alpha"},
-            "issue": self.task["issue"] | {"number": 101},
-            "ground_truth": self.task["ground_truth"] | {"pr_number": 202},
-        }
-        repo = {
-            "name": "acme/alpha",
-            "url": "https://github.com/acme/alpha",
-            "git_url": "https://github.com/acme/alpha.git",
-            "description": "Large TypeScript app",
-            "language": "TypeScript",
-            "license": "MIT",
-            "stars": 12000,
-            "size_kb": 48000,
-        }
-        repo_candidates = [
-            self.example_discovery_pool()[0],
-            self.example_discovery_pool()[0]
-            | {
-                "issue": self.example_discovery_pool()[0]["issue"] | {"number": 102},
-                "pr": self.example_discovery_pool()[0]["pr"] | {"number": 203},
-            },
-        ]
-        with mock.patch.object(benchmark, "search_candidate_repositories", return_value=[repo]), mock.patch.object(
-            benchmark, "search_recent_repo_candidates", return_value=repo_candidates
+    def test_run_judge_claude_streams_prompt_over_stdin(self) -> None:
+        prompt = "x" * 20000
+        expected = self.example_judgment()
+        with (
+            mock.patch.object(benchmark, "require_command"),
+            mock.patch.object(
+                benchmark,
+                "run",
+                return_value=subprocess.CompletedProcess(["claude"], 0, stdout="{}"),
+            ) as run_mock,
+            mock.patch.object(benchmark, "parse_judge_output", return_value=expected),
+            mock.patch.object(benchmark, "validate_judgment"),
         ):
-            pool = benchmark.collect_discovery_pool(
-                {"existing": existing_task},
-                repo_limit=5,
-                prs_per_repo=5,
-                pool_size=5,
-                min_stars=2000,
-                min_size_kb=5000,
-                pr_cutoff=benchmark.parse_cli_date("2025-09-10"),
-            )
-        self.assertEqual(len(pool), 1)
-        self.assertEqual(pool[0]["repo"]["name"], "acme/alpha")
-        self.assertEqual(pool[0]["issue"]["number"], 102)
-        self.assertEqual(pool[0]["pr"]["number"], 203)
+            result = benchmark.run_judge_claude(prompt, cwd=Path("/tmp"), judge_model="sonnet")
+
+        self.assertEqual(result, expected)
+        self.assertEqual(run_mock.call_args.args[0][-2:], ["--model", "sonnet"])
+        self.assertNotIn(prompt, run_mock.call_args.args[0])
+        self.assertEqual(run_mock.call_args.kwargs["input_text"], prompt)
+
+    def test_run_judge_codex_streams_prompt_over_stdin(self) -> None:
+        prompt = "x" * 20000
+
+        def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            output_path = Path(args[args.index("-o") + 1])
+            output_path.write_text(json.dumps(self.example_judgment()))
+            return subprocess.CompletedProcess(args, 0, stdout="")
+
+        with (
+            mock.patch.object(benchmark, "require_command"),
+            mock.patch.object(benchmark, "run", side_effect=fake_run) as run_mock,
+        ):
+            result = benchmark.run_judge_codex(prompt, cwd=Path("/tmp"), judge_model="gpt-5")
+
+        self.assertEqual(result, self.example_judgment())
+        self.assertEqual(run_mock.call_args.args[0][-3:], ["--model", "gpt-5", "-"])
+        self.assertNotIn(prompt, run_mock.call_args.args[0])
+        self.assertEqual(run_mock.call_args.kwargs["input_text"], prompt)
 
 
 class BenchmarkCliSmokeTests(unittest.TestCase):
@@ -435,11 +272,6 @@ class BenchmarkCliSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("publish", result.stdout)
 
-    def test_container_build_help(self) -> None:
-        result = self.run_help("container-build")
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("container-build", result.stdout)
-
     def test_report_help(self) -> None:
         result = self.run_help("report")
         self.assertEqual(result.returncode, 0)
@@ -449,14 +281,8 @@ class BenchmarkCliSmokeTests(unittest.TestCase):
         result = self.run_help("run-task")
         self.assertEqual(result.returncode, 0)
         self.assertIn("run-task", result.stdout)
+        self.assertIn("--agent-model", result.stdout)
         self.assertIn("--judge-model", result.stdout)
-        self.assertIn("--runtime", result.stdout)
-
-    def test_discover_help(self) -> None:
-        result = self.run_help("discover")
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("discover", result.stdout)
-        self.assertIn("--pr-cutoff", result.stdout)
 
 
 if __name__ == "__main__":

@@ -15,35 +15,22 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
 TASKS_PATH = SCRIPT_DIR / "tasks.json"
 DEFAULT_ROOT = SCRIPT_DIR / "workspaces"
 DEFAULT_FORK_OWNER = "btucker"
 DEFAULT_JUDGE_AGENT = "claude"
 SUPPORTED_AGENTS = ("codex", "claude")
 SUPPORTED_CONDITIONS = ("control", "tg")
-SUPPORTED_RUNTIMES = ("host", "docker")
-DISCOVERY_LANGUAGES = ("JavaScript", "Python", "Rust", "TypeScript")
-DISCOVERY_KIND_VALUES = ("bug", "feature")
-DEFAULT_DISCOVERY_MIN_STARS = 2000
-DEFAULT_DISCOVERY_MIN_SIZE_KB = 5000
-DEFAULT_DISCOVERY_REPO_LIMIT = 12
-DEFAULT_DISCOVERY_PRS_PER_REPO = 16
-DEFAULT_DISCOVERY_POOL_SIZE = 20
-DEFAULT_DISCOVERY_CANDIDATE_COUNT = 8
-DEFAULT_DISCOVERY_CUTOFF_DAYS = 183
 TRACEGREP_SKILL_SOURCE = SCRIPT_DIR.parent / "skills" / "tracegrep"
 BENCHMARK_EXPORT_NAME = "tracegrep-eval"
 BENCHMARK_EXPORT_EMAIL = "tracegrep-eval@example.com"
-DEFAULT_DOCKER_IMAGE = "tracegrep-eval-devcontainer:latest"
-DEFAULT_DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
 
 JUDGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -140,99 +127,6 @@ JUDGE_SCHEMA: dict[str, Any] = {
     },
 }
 
-DISCOVERY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "candidates"],
-    "properties": {
-        "summary": {"type": "string"},
-        "candidates": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 20,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "repo_name",
-                    "issue_number",
-                    "pr_number",
-                    "kind",
-                    "fit_score",
-                    "rationale",
-                    "prompt_title",
-                    "prompt_body",
-                    "evaluation_focus",
-                ],
-                "properties": {
-                    "repo_name": {"type": "string"},
-                    "issue_number": {"type": "integer", "minimum": 1},
-                    "pr_number": {"type": "integer", "minimum": 1},
-                    "kind": {"type": "string", "enum": list(DISCOVERY_KIND_VALUES)},
-                    "fit_score": {"type": "integer", "minimum": 1, "maximum": 5},
-                    "rationale": {"type": "string"},
-                    "prompt_title": {"type": "string"},
-                    "prompt_body": {"type": "string"},
-                    "evaluation_focus": {
-                        "type": "array",
-                        "minItems": 2,
-                        "maxItems": 4,
-                        "items": {"type": "string"},
-                    },
-                },
-            },
-        },
-    },
-}
-
-DISCOVERY_PULL_REQUEST_QUERY = """
-query($searchQuery: String!, $limit: Int!) {
-  search(query: $searchQuery, type: ISSUE, first: $limit) {
-    nodes {
-      __typename
-      ... on PullRequest {
-        number
-        title
-        url
-        mergedAt
-        changedFiles
-        additions
-        deletions
-        author {
-          login
-        }
-        mergeCommit {
-          oid
-          parents(first: 2) {
-            nodes {
-              oid
-            }
-          }
-        }
-        closingIssuesReferences(first: 10) {
-          nodes {
-            number
-            title
-            url
-            createdAt
-            closedAt
-            bodyText
-            author {
-              login
-            }
-            labels(first: 20) {
-              nodes {
-                name
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-""".strip()
-
 
 def load_tasks() -> dict[str, dict[str, Any]]:
     tasks = json.loads(TASKS_PATH.read_text())
@@ -263,9 +157,8 @@ def worktree_dir(root: Path, task_id: str, condition: str) -> Path:
     return run_dir(root, task_id) / "worktrees" / condition
 
 
-def launch_script_path(root: Path, task_id: str, agent: str, condition: str, runtime: str = "host") -> Path:
-    suffix = "" if runtime == "host" else f"_{runtime}"
-    return run_dir(root, task_id) / f"launch_{agent}_{condition}{suffix}.sh"
+def launch_script_path(root: Path, task_id: str, agent: str, condition: str) -> Path:
+    return run_dir(root, task_id) / f"launch_{agent}_{condition}.sh"
 
 
 def evaluations_root(root: Path, task_id: str, agent: str) -> Path:
@@ -284,20 +177,12 @@ def evaluation_report_path(root: Path, task_id: str, agent: str, eval_id: str) -
     return reports_dir(root) / task_id / agent / f"{eval_id}.md"
 
 
-def discovery_dir(root: Path, agent: str, run_id: str) -> Path:
-    return root / "discovery" / f"{run_id}-{agent}"
-
-
 def local_tg_path(worktree: Path) -> Path:
     return worktree / ".eval-bin" / "tg"
 
 
 def local_cache_root(worktree: Path) -> Path:
     return worktree / ".tracegrep-cache"
-
-
-def default_docker_image() -> str:
-    return os.environ.get("TRACEGREP_EVAL_DOCKER_IMAGE", DEFAULT_DOCKER_IMAGE)
 
 
 def run(
@@ -495,12 +380,10 @@ def build_run_readme(task: dict[str, Any], root: Path) -> str:
         "",
         "Launchers:",
     ]
-    for runtime in SUPPORTED_RUNTIMES:
-        lines.append(f"- Runtime: {runtime}")
-        for agent in SUPPORTED_AGENTS:
-            for condition in SUPPORTED_CONDITIONS:
-                script = launch_script_path(root, task["id"], agent, condition, runtime)
-                lines.append(f"  - {script.name}")
+    for agent in SUPPORTED_AGENTS:
+        for condition in SUPPORTED_CONDITIONS:
+            script = launch_script_path(root, task["id"], agent, condition)
+            lines.append(f"- {script.name}")
     lines.extend(
         [
             "",
@@ -515,13 +398,8 @@ def build_run_readme(task: dict[str, Any], root: Path) -> str:
             "tg condition environment additions:",
             "- `.codex/skills/tracegrep/` copied from this repo",
             "- `.claude/settings.local.json` enabling `tracegrep@tracegrep-dev`",
-            "- `.eval-bin/tg` copied from the host `tg` binary so the host runtime can execute it inside the workspace sandbox",
+            "- `.eval-bin/tg` copied from the host `tg` binary so the workspace sandbox can execute it",
             "- `.tracegrep-cache/` used via `TRACEGREP_CACHE_DIR` to keep cache writes inside the worktree",
-            "",
-            "Docker runtime additions:",
-            f"- Image tag defaults to `{default_docker_image()}` and can be overridden with `TRACEGREP_EVAL_DOCKER_IMAGE`",
-            "- Claude state mounts default to `~/.claude` and `~/.claude.json`; Codex state mounts default to `~/.codex`",
-            "- Docker launchers mount only the prepared worktree plus the prompt file, then run the agent with dangerous-mode flags inside the container boundary",
             "",
             "Evaluation flow:",
             "- `judge` creates blind comparison artifacts under `evaluations/<agent>/<eval-id>/`",
@@ -532,46 +410,7 @@ def build_run_readme(task: dict[str, Any], root: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
-def shell_literal(value: str) -> str:
-    return shlex.quote(value)
-
-
-def container_agent_state_mounts(agent: str) -> list[tuple[str, str, bool]]:
-    home = Path.home()
-    if agent == "claude":
-        return [
-            ("TRACEGREP_EVAL_CLAUDE_HOME", str(home / ".claude"), "/home/node/.claude", False),
-            ("TRACEGREP_EVAL_CLAUDE_JSON", str(home / ".claude.json"), "/home/node/.claude.json", True),
-        ]
-    if agent == "codex":
-        return [
-            ("TRACEGREP_EVAL_CODEX_HOME", str(home / ".codex"), "/home/node/.codex", False),
-        ]
-    raise ValueError(f"unsupported agent: {agent}")
-
-
-def container_agent_env_vars(agent: str) -> list[str]:
-    if agent == "claude":
-        return [
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_BASE_URL",
-            "AWS_PROFILE",
-            "AWS_REGION",
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_VERTEX",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-        ]
-    if agent == "codex":
-        return [
-            "OPENAI_API_KEY",
-            "OPENAI_BASE_URL",
-            "OPENAI_ORG_ID",
-            "OPENAI_PROJECT_ID",
-        ]
-    raise ValueError(f"unsupported agent: {agent}")
-
-
-def build_host_launcher_script(task: dict[str, Any], root: Path, agent: str, condition: str) -> str:
+def build_launcher_script(task: dict[str, Any], root: Path, agent: str, condition: str) -> str:
     base = run_dir(root, task["id"])
     prompt_file = base / "prompts" / f"{condition}.md"
     worktree = base / "worktrees" / condition
@@ -637,120 +476,6 @@ def build_host_launcher_script(task: dict[str, Any], root: Path, agent: str, con
     return "\n".join(lines) + "\n"
 
 
-def build_docker_launcher_script(task: dict[str, Any], root: Path, agent: str, condition: str) -> str:
-    base = run_dir(root, task["id"])
-    prompt_file = base / "prompts" / f"{condition}.md"
-    worktree = base / "worktrees" / condition
-    if agent == "codex":
-        agent_command = 'exec codex --dangerously-bypass-approvals-and-sandbox "$@" "$(cat /tmp/tracegrep-prompt.md)"'
-    elif agent == "claude":
-        agent_command = 'exec claude --dangerously-skip-permissions "$@" "$(cat /tmp/tracegrep-prompt.md)"'
-    else:
-        raise ValueError(f"unsupported agent: {agent}")
-
-    preflight_lines: list[str] = []
-    warmup_lines: list[str] = []
-    if condition == "tg":
-        warmup_lines = [
-            'echo "Prebuilding tracegrep index in /workspace..."',
-            "tg --build-index",
-        ]
-    if agent == "claude" and condition == "tg":
-        preflight_lines = [
-            'PLUGIN_ID="tracegrep@tracegrep-dev"',
-            "if ! claude plugin list --json | python3 -c '",
-            "import json",
-            "import sys",
-            "",
-            "plugin_id = sys.argv[1]",
-            "plugins = json.load(sys.stdin)",
-            'installed = any(plugin.get(\"id\") == plugin_id for plugin in plugins)',
-            "sys.exit(0 if installed else 1)",
-            '\' "$PLUGIN_ID"; then',
-            '  echo "Required Claude plugin not installed: $PLUGIN_ID" >&2',
-            '  echo "Install it in the mounted Claude state before rerunning:" >&2',
-            '  echo "  claude plugin install $PLUGIN_ID" >&2',
-            "  exit 1",
-            "fi",
-        ]
-
-    container_lines = [
-        "set -euo pipefail",
-        "cd /workspace",
-        "export TRACEGREP_CACHE_DIR=/workspace/.tracegrep-cache",
-    ]
-    if preflight_lines:
-        container_lines.extend(preflight_lines)
-    if warmup_lines:
-        container_lines.extend(warmup_lines)
-    container_lines.append(agent_command)
-    container_script = "\n".join(container_lines)
-
-    lines = [
-        "#!/usr/bin/env bash",
-        "set -euo pipefail",
-        "",
-        f'WORKTREE={shell_literal(str(worktree))}',
-        f'PROMPT_FILE={shell_literal(str(prompt_file))}',
-        f'IMAGE="${{TRACEGREP_EVAL_DOCKER_IMAGE:-{default_docker_image()}}}"',
-        'DOCKER_ARGS=(run --rm)',
-        'if [[ -t 0 && -t 1 ]]; then',
-        '  DOCKER_ARGS+=(-it)',
-        "fi",
-        'DOCKER_ARGS+=(',
-        '  -w /workspace',
-        '  -v "$WORKTREE:/workspace"',
-        '  -v "$PROMPT_FILE:/tmp/tracegrep-prompt.md:ro"',
-        '  -e TRACEGREP_CACHE_DIR=/workspace/.tracegrep-cache',
-        ')',
-        "",
-    ]
-    for env_name, host_default, container_path, is_file in container_agent_state_mounts(agent):
-        kind_check = "-f" if is_file else "-d"
-        lines.extend(
-            [
-                f'HOST_PATH="${{{env_name}:-{host_default}}}"',
-                f'if [[ {kind_check} "$HOST_PATH" ]]; then',
-                f'  DOCKER_ARGS+=(-v "$HOST_PATH:{container_path}")',
-                "fi",
-                "",
-            ]
-        )
-    for env_name in container_agent_env_vars(agent):
-        lines.extend(
-            [
-                f'if [[ -n "${{{env_name}:-}}" ]]; then',
-                f'  DOCKER_ARGS+=(-e {env_name})',
-                "fi",
-            ]
-        )
-    lines.extend(
-        [
-            "",
-            'read -r -d "" CONTAINER_SCRIPT <<\'EOF\' || true',
-            container_script,
-            "EOF",
-            "",
-            'exec docker "${DOCKER_ARGS[@]}" "$IMAGE" bash -lc "$CONTAINER_SCRIPT" bash "$@"',
-        ]
-    )
-    return "\n".join(lines) + "\n"
-
-
-def build_launcher_script(
-    task: dict[str, Any],
-    root: Path,
-    agent: str,
-    condition: str,
-    runtime: str,
-) -> str:
-    if runtime == "host":
-        return build_host_launcher_script(task, root, agent, condition)
-    if runtime == "docker":
-        return build_docker_launcher_script(task, root, agent, condition)
-    raise ValueError(f"unsupported runtime: {runtime}")
-
-
 def prepare_task(root: Path, task: dict[str, Any], *, force: bool) -> None:
     ensure_root(root)
     base = run_dir(root, task["id"])
@@ -773,12 +498,11 @@ def prepare_task(root: Path, task: dict[str, Any], *, force: bool) -> None:
     write_json(base / "hidden" / "ground_truth.json", hidden_payload)
     (base / "README.md").write_text(build_run_readme(task, root))
 
-    for runtime in SUPPORTED_RUNTIMES:
-        for agent in SUPPORTED_AGENTS:
-            for condition in SUPPORTED_CONDITIONS:
-                script_path = launch_script_path(root, task["id"], agent, condition, runtime)
-                script_path.write_text(build_launcher_script(task, root, agent, condition, runtime))
-                os.chmod(script_path, 0o755)
+    for agent in SUPPORTED_AGENTS:
+        for condition in SUPPORTED_CONDITIONS:
+            script_path = launch_script_path(root, task["id"], agent, condition)
+            script_path.write_text(build_launcher_script(task, root, agent, condition))
+            os.chmod(script_path, 0o755)
 
 
 def cmd_list(tasks: dict[str, dict[str, Any]]) -> int:
@@ -815,104 +539,6 @@ def cmd_prepare(tasks: dict[str, dict[str, Any]], task_ids: list[str], root: Pat
     return 0
 
 
-def cmd_discover(
-    tasks: dict[str, dict[str, Any]],
-    root: Path,
-    *,
-    agent: str,
-    model: str | None,
-    pr_cutoff: date,
-    repo_limit: int,
-    prs_per_repo: int,
-    pool_size: int,
-    candidate_count: int,
-    min_stars: int,
-    min_size_kb: int,
-) -> int:
-    ensure_root(root)
-    run_id = new_eval_id()
-    output_dir = discovery_dir(root, agent, run_id)
-    output_dir.mkdir(parents=True, exist_ok=False)
-
-    raw_candidates = collect_discovery_pool(
-        tasks,
-        repo_limit=repo_limit,
-        prs_per_repo=prs_per_repo,
-        pool_size=pool_size,
-        min_stars=min_stars,
-        min_size_kb=min_size_kb,
-        pr_cutoff=pr_cutoff,
-    )
-    if not raw_candidates:
-        raise SystemExit(
-            "No discovery candidates matched the current filters. "
-            "Loosen the repo limits or move the PR cutoff earlier."
-        )
-
-    search_params = {
-        "repo_limit": repo_limit,
-        "prs_per_repo": prs_per_repo,
-        "pool_size": pool_size,
-        "candidate_count": candidate_count,
-        "min_stars": min_stars,
-        "min_size_kb": min_size_kb,
-    }
-    generated_at = datetime.now(timezone.utc).isoformat()
-    write_json(
-        output_dir / "raw_candidates.json",
-        {
-            "generated_at": generated_at,
-            "pr_cutoff": pr_cutoff.isoformat(),
-            "search_params": search_params,
-            "candidates": raw_candidates,
-        },
-    )
-    prompt = build_discovery_prompt(
-        raw_candidates,
-        candidate_count=candidate_count,
-        pr_cutoff=pr_cutoff,
-    )
-    write_text(output_dir / "selection_prompt.md", prompt)
-    selection = run_discovery_agent(agent, prompt, cwd=output_dir, model=model)
-    validate_discovery_selection(selection, raw_candidates, candidate_count=candidate_count)
-    write_json(output_dir / "selection.json", selection)
-
-    shortlist = build_discovery_shortlist(
-        selection,
-        raw_candidates,
-        agent=agent,
-        model=model,
-        generated_at=generated_at,
-        pr_cutoff=pr_cutoff,
-        search_params=search_params,
-    )
-    write_json(output_dir / "shortlist.json", shortlist)
-    write_text(output_dir / "report.md", build_discovery_markdown(shortlist))
-
-    print(f"discovered {len(shortlist['candidates'])} candidates at {output_dir}")
-    print(f"pr cutoff: {pr_cutoff.isoformat()}")
-    print(f"report: {output_dir / 'report.md'}")
-    for candidate in shortlist["candidates"]:
-        print(
-            f"- [{candidate['kind']}] {candidate['repo']['name']} issue #{candidate['issue']['number']} "
-            f"-> PR #{candidate['ground_truth']['pr_number']}"
-        )
-    return 0
-
-
-def cmd_container_build(*, image: str, dockerfile: Path, no_cache: bool) -> int:
-    require_command("docker")
-    if not dockerfile.exists():
-        raise SystemExit(f"Dockerfile not found: {dockerfile}")
-    command = ["docker", "build", "-f", str(dockerfile), "-t", image]
-    if no_cache:
-        command.append("--no-cache")
-    command.append(str(REPO_ROOT))
-    print("building:", " ".join(shlex.quote(part) for part in command))
-    completed = subprocess.run(command)
-    return completed.returncode
-
-
 def cmd_launch(
     tasks: dict[str, dict[str, Any]],
     task_id: str,
@@ -920,7 +546,6 @@ def cmd_launch(
     *,
     agent: str,
     condition: str,
-    runtime: str,
     prepare: bool,
     force: bool,
     extra_args: list[str],
@@ -928,9 +553,7 @@ def cmd_launch(
     task = tasks[task_id]
     if prepare:
         prepare_task(root, task, force=force)
-    if runtime == "docker":
-        require_command("docker")
-    script = launch_script_path(root, task_id, agent, condition, runtime)
+    script = launch_script_path(root, task_id, agent, condition)
     if not script.exists():
         raise SystemExit(
             f"{script} does not exist. Run `uv run eval/benchmark.py prepare {task_id}` first."
@@ -950,513 +573,19 @@ def default_judge_agent() -> str:
     return value
 
 
+def forwarded_build_args(extra_args: list[str], agent_model: str | None) -> list[str]:
+    if agent_model is None:
+        return list(extra_args)
+    model_flags = {"--model", "-m"}
+    if any(arg in model_flags for arg in extra_args):
+        raise SystemExit(
+            "Do not pass both `--agent-model` and a forwarded `--model`/`-m` after `--`."
+        )
+    return ["--model", agent_model, *extra_args]
+
+
 def new_eval_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def default_discovery_pr_cutoff() -> date:
-    return datetime.now(timezone.utc).date() - timedelta(days=DEFAULT_DISCOVERY_CUTOFF_DAYS)
-
-
-def parse_cli_date(value: str) -> date:
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD date, got {value!r}") from exc
-
-
-def gh_api_json(args: list[str]) -> Any:
-    require_command("gh")
-    completed = run(["gh", "api", *args], capture_output=True)
-    return json.loads(completed.stdout)
-
-
-def gh_graphql_json(query: str, variables: dict[str, Any]) -> Any:
-    command = ["gh", "api", "graphql", "-f", f"query={query}"]
-    for key, value in variables.items():
-        command.extend(["-F", f"{key}={value}"])
-    completed = run(command, capture_output=True)
-    return json.loads(completed.stdout)
-
-
-def truncate_text(value: str, limit: int = 600) -> str:
-    collapsed = " ".join(value.split())
-    if len(collapsed) <= limit:
-        return collapsed
-    return collapsed[: limit - 3].rstrip() + "..."
-
-
-def candidate_key(repo_name: str, issue_number: int, pr_number: int) -> tuple[str, int, int]:
-    return (repo_name, issue_number, pr_number)
-
-
-def candidate_kind_hint(title: str, labels: list[str], body: str) -> str:
-    tokens = " ".join([title, body, *labels]).lower()
-    bug_markers = (
-        "bug",
-        "regression",
-        "crash",
-        "error",
-        "incorrect",
-        "broken",
-        "fails",
-        "failure",
-        "fix",
-    )
-    feature_markers = (
-        "feature",
-        "enhancement",
-        "proposal",
-        "rfc",
-        "support",
-        "add ",
-        "allow",
-        "option",
-        "request",
-    )
-    if any(marker in tokens for marker in bug_markers):
-        return "bug"
-    if any(marker in tokens for marker in feature_markers):
-        return "feature"
-    return "unknown"
-
-
-def search_candidate_repositories(
-    tasks: dict[str, dict[str, Any]],
-    *,
-    limit: int,
-    min_stars: int,
-    min_size_kb: int,
-) -> list[dict[str, Any]]:
-    search_limit = min(max(limit * 4, limit), 100)
-    query = " ".join(
-        [
-            "archived:false",
-            "fork:false",
-            "mirror:false",
-            "template:false",
-            "is:public",
-            "license:mit",
-            f"stars:>={min_stars}",
-            f"size:>={min_size_kb}",
-        ]
-    )
-    url = "https://api.github.com/search/repositories?" + urlencode(
-        {
-            "q": query,
-            "sort": "stars",
-            "order": "desc",
-            "per_page": search_limit,
-        }
-    )
-    payload = gh_api_json(
-        [
-            url,
-        ]
-    )
-    repos = []
-    for item in payload.get("items", []):
-        name = item["full_name"]
-        language = item.get("language")
-        license_info = item.get("license") or {}
-        if language not in DISCOVERY_LANGUAGES:
-            continue
-        if license_info.get("spdx_id") != "MIT":
-            continue
-        repos.append(
-            {
-                "name": name,
-                "url": item["html_url"],
-                "git_url": item["clone_url"],
-                "description": item.get("description") or "",
-                "language": language,
-                "license": "MIT",
-                "stars": item["stargazers_count"],
-                "size_kb": item["size"],
-            }
-        )
-        if len(repos) >= limit:
-            break
-    return repos
-
-
-def search_recent_repo_candidates(
-    repo: dict[str, Any],
-    *,
-    pr_cutoff: date,
-    limit: int,
-) -> list[dict[str, Any]]:
-    query = f"repo:{repo['name']} is:pr is:merged merged:>={pr_cutoff.isoformat()} sort:updated-desc"
-    payload = gh_graphql_json(
-        DISCOVERY_PULL_REQUEST_QUERY,
-        {"searchQuery": query, "limit": limit},
-    )
-    nodes = payload.get("data", {}).get("search", {}).get("nodes", [])
-    candidates = []
-    for node in nodes:
-        if node.get("__typename") != "PullRequest":
-            continue
-        pr_author = ((node.get("author") or {}).get("login") or "").strip()
-        merge_commit = node.get("mergeCommit") or {}
-        parents = (merge_commit.get("parents") or {}).get("nodes") or []
-        if not pr_author or not merge_commit.get("oid") or not parents:
-            continue
-        closing_issues = (node.get("closingIssuesReferences") or {}).get("nodes") or []
-        for issue in closing_issues:
-            issue_author = ((issue.get("author") or {}).get("login") or "").strip()
-            if not issue_author or issue_author == pr_author:
-                continue
-            labels = [label["name"] for label in (issue.get("labels") or {}).get("nodes", [])]
-            body = issue.get("bodyText") or ""
-            candidates.append(
-                {
-                    "repo": repo,
-                    "issue": {
-                        "number": issue["number"],
-                        "url": issue["url"],
-                        "title": issue["title"],
-                        "author": issue_author,
-                        "created_at": issue["createdAt"],
-                        "closed_at": issue.get("closedAt"),
-                        "labels": labels,
-                        "body_excerpt": truncate_text(body),
-                    },
-                    "pr": {
-                        "number": node["number"],
-                        "url": node["url"],
-                        "title": node["title"],
-                        "author": pr_author,
-                        "merged_at": node["mergedAt"],
-                        "merge_commit": merge_commit["oid"],
-                        "pre_fix_commit": parents[0]["oid"],
-                        "changed_files": node.get("changedFiles"),
-                        "additions": node.get("additions"),
-                        "deletions": node.get("deletions"),
-                    },
-                    "kind_hint": candidate_kind_hint(issue["title"], labels, body),
-                }
-            )
-            break
-    return candidates
-
-
-def collect_discovery_pool(
-    tasks: dict[str, dict[str, Any]],
-    *,
-    repo_limit: int,
-    prs_per_repo: int,
-    pool_size: int,
-    min_stars: int,
-    min_size_kb: int,
-    pr_cutoff: date,
-) -> list[dict[str, Any]]:
-    pool: list[dict[str, Any]] = []
-    seen: set[tuple[str, int, int]] = {
-        candidate_key(
-            task["repo"]["name"],
-            task["issue"]["number"],
-            task["ground_truth"]["pr_number"],
-        )
-        for task in tasks.values()
-    }
-    repos = search_candidate_repositories(
-        tasks,
-        limit=repo_limit,
-        min_stars=min_stars,
-        min_size_kb=min_size_kb,
-    )
-    for repo in repos:
-        repo_candidates = search_recent_repo_candidates(repo, pr_cutoff=pr_cutoff, limit=prs_per_repo)
-        for candidate in repo_candidates:
-            key = candidate_key(
-                candidate["repo"]["name"],
-                candidate["issue"]["number"],
-                candidate["pr"]["number"],
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            pool.append(candidate)
-            if len(pool) >= pool_size:
-                return pool
-    return pool
-
-
-def build_discovery_prompt(
-    raw_candidates: list[dict[str, Any]],
-    *,
-    candidate_count: int,
-    pr_cutoff: date,
-) -> str:
-    prompt_input = []
-    for candidate in raw_candidates:
-        prompt_input.append(
-            {
-                "repo": {
-                    "name": candidate["repo"]["name"],
-                    "url": candidate["repo"]["url"],
-                    "language": candidate["repo"]["language"],
-                    "stars": candidate["repo"]["stars"],
-                    "size_kb": candidate["repo"]["size_kb"],
-                    "description": candidate["repo"]["description"],
-                },
-                "issue": candidate["issue"],
-                "pr": candidate["pr"],
-                "kind_hint": candidate["kind_hint"],
-            }
-        )
-    return textwrap.dedent(
-        f"""\
-        You are curating new benchmark candidates for the tracegrep evaluation harness.
-
-        Goal:
-        - Select up to {candidate_count} issue/PR pairs from the provided pool.
-        - Keep a mix of bugs and features when the pool allows it.
-        - Prefer tasks where tracegrep is likely to matter because the accepted change should require navigating an existing medium-to-large codebase.
-        - Favor candidates that look self-contained enough to benchmark, but still substantial enough to differentiate agent behavior.
-        - Do not invent candidates outside the provided pool.
-
-        Hard constraints already enforced before you see the pool:
-        - public repo
-        - MIT license
-        - supported primary language for tracegrep benchmarking
-        - medium-to-large repository size
-        - popular repository
-        - PR author differs from the issue reporter
-        - PR merged on or after {pr_cutoff.isoformat()} to reduce training-data contamination risk
-
-        For each selected candidate:
-        - choose `kind` as either `bug` or `feature`
-        - explain briefly why it is benchmark-worthy
-        - draft a benchmark-safe prompt title/body that describes the task without leaking the accepted solution
-        - provide 2 to 4 evaluation-focus bullets
-
-        Output only JSON matching the schema.
-
-        Candidate pool:
-        {json.dumps(prompt_input, indent=2)}
-        """
-    ).strip() + "\n"
-
-
-def validate_discovery_selection(
-    payload: dict[str, Any],
-    raw_candidates: list[dict[str, Any]],
-    *,
-    candidate_count: int,
-) -> None:
-    if not isinstance(payload, dict):
-        raise ValueError("Discovery output was not a JSON object.")
-    if not isinstance(payload.get("summary"), str):
-        raise ValueError("Discovery summary must be a string.")
-    selected = payload.get("candidates")
-    if not isinstance(selected, list) or not selected:
-        raise ValueError("Discovery candidates must be a non-empty list.")
-    if len(selected) > candidate_count:
-        raise ValueError(f"Discovery returned {len(selected)} candidates, expected at most {candidate_count}.")
-
-    valid_keys = {
-        candidate_key(item["repo"]["name"], item["issue"]["number"], item["pr"]["number"]): item
-        for item in raw_candidates
-    }
-    seen: set[tuple[str, int, int]] = set()
-    selected_kinds: set[str] = set()
-    for item in selected:
-        for key in ("repo_name", "issue_number", "pr_number", "rationale", "prompt_title", "prompt_body"):
-            if not isinstance(item.get(key), str if key in {"repo_name", "rationale", "prompt_title", "prompt_body"} else int):
-                raise ValueError(f"Discovery candidate field {key} had the wrong type.")
-        if item.get("kind") not in DISCOVERY_KIND_VALUES:
-            raise ValueError("Discovery candidate kind must be bug or feature.")
-        fit_score = item.get("fit_score")
-        if not isinstance(fit_score, int) or not (1 <= fit_score <= 5):
-            raise ValueError("Discovery fit_score must be an integer between 1 and 5.")
-        focus = item.get("evaluation_focus")
-        if not isinstance(focus, list) or not (2 <= len(focus) <= 4) or not all(
-            isinstance(entry, str) for entry in focus
-        ):
-            raise ValueError("Discovery evaluation_focus must contain 2 to 4 strings.")
-        key = candidate_key(item["repo_name"], item["issue_number"], item["pr_number"])
-        if key not in valid_keys:
-            raise ValueError(f"Discovery selected a candidate not present in the raw pool: {key}")
-        if key in seen:
-            raise ValueError(f"Discovery selected the same candidate twice: {key}")
-        seen.add(key)
-        selected_kinds.add(item["kind"])
-
-    available_kinds = {
-        item["kind_hint"] for item in raw_candidates if item["kind_hint"] in DISCOVERY_KIND_VALUES
-    }
-    if available_kinds == set(DISCOVERY_KIND_VALUES) and selected_kinds != set(DISCOVERY_KIND_VALUES):
-        raise ValueError("Discovery selection did not keep a bug/feature mix even though the pool allowed it.")
-
-
-def build_discovery_shortlist(
-    selection: dict[str, Any],
-    raw_candidates: list[dict[str, Any]],
-    *,
-    agent: str,
-    model: str | None,
-    generated_at: str,
-    pr_cutoff: date,
-    search_params: dict[str, Any],
-) -> dict[str, Any]:
-    source_map = {
-        candidate_key(item["repo"]["name"], item["issue"]["number"], item["pr"]["number"]): item
-        for item in raw_candidates
-    }
-    candidates = []
-    for rank, item in enumerate(selection["candidates"], start=1):
-        source = source_map[candidate_key(item["repo_name"], item["issue_number"], item["pr_number"])]
-        candidates.append(
-            {
-                "rank": rank,
-                "repo": source["repo"],
-                "issue": source["issue"],
-                "ground_truth": {
-                    "pr_number": source["pr"]["number"],
-                    "pr_url": source["pr"]["url"],
-                    "merge_commit": source["pr"]["merge_commit"],
-                    "pre_fix_commit": source["pr"]["pre_fix_commit"],
-                    "merged_at": source["pr"]["merged_at"],
-                    "pr_author": source["pr"]["author"],
-                },
-                "kind": item["kind"],
-                "fit_score": item["fit_score"],
-                "rationale": item["rationale"],
-                "prompt": {
-                    "title": item["prompt_title"],
-                    "body": item["prompt_body"],
-                },
-                "evaluation_focus": item["evaluation_focus"],
-                "kind_hint": source["kind_hint"],
-                "issue_reporter": source["issue"]["author"],
-            }
-        )
-    return {
-        "generated_at": generated_at,
-        "agent": agent,
-        "model": model,
-        "pr_cutoff": pr_cutoff.isoformat(),
-        "summary": selection["summary"],
-        "search_params": search_params,
-        "raw_pool_size": len(raw_candidates),
-        "candidates": candidates,
-    }
-
-
-def build_discovery_markdown(shortlist: dict[str, Any]) -> str:
-    lines = [
-        "# Benchmark Discovery Report",
-        "",
-        f"- Generated at: `{shortlist['generated_at']}`",
-        f"- Agent: `{shortlist['agent']}`",
-        f"- Model: `{shortlist['model'] or 'default'}`",
-        f"- PR cutoff: `{shortlist['pr_cutoff']}`",
-        f"- Raw pool size: `{shortlist['raw_pool_size']}`",
-        "",
-        "## Summary",
-        shortlist["summary"],
-    ]
-    for candidate in shortlist["candidates"]:
-        lines.extend(
-            [
-                "",
-                f"## {candidate['rank']}. {candidate['repo']['name']} #{candidate['issue']['number']}",
-                f"- Kind: `{candidate['kind']}` (hint: `{candidate['kind_hint']}`)",
-                f"- Repo: {candidate['repo']['language']} | {candidate['repo']['stars']} stars | {candidate['repo']['size_kb']} KB",
-                f"- Issue: [{candidate['issue']['title']}]({candidate['issue']['url']}) by `{candidate['issue_reporter']}`",
-                f"- PR: [#{candidate['ground_truth']['pr_number']}]({candidate['ground_truth']['pr_url']}) by `{candidate['ground_truth']['pr_author']}` merged `{candidate['ground_truth']['merged_at']}`",
-                f"- Rationale: {candidate['rationale']}",
-                "",
-                "### Prompt Draft",
-                f"- Title: {candidate['prompt']['title']}",
-                f"- Body: {candidate['prompt']['body']}",
-                "",
-                "### Evaluation Focus",
-                *(f"- {item}" for item in candidate["evaluation_focus"]),
-            ]
-        )
-    return "\n".join(lines) + "\n"
-
-
-def run_discovery_claude(prompt: str, *, cwd: Path, model: str | None) -> dict[str, Any]:
-    require_command("claude")
-    command = [
-        "claude",
-        "-p",
-        "--output-format",
-        "json",
-        "--json-schema",
-        json.dumps(DISCOVERY_SCHEMA),
-        "--permission-mode",
-        "default",
-        "--tools",
-        "",
-    ]
-    if model:
-        command.extend(["--model", model])
-    command.append(prompt)
-    try:
-        completed = run(command, cwd=cwd, capture_output=True)
-    except subprocess.CalledProcessError as exc:
-        stderr_msg = (exc.stderr or "").strip()
-        raise RuntimeError(
-            f"claude exec failed (exit {exc.returncode}): {stderr_msg}"
-        ) from exc
-    payload = parse_json_output(completed.stdout)
-    if not isinstance(payload, dict):
-        raise ValueError("Discovery output was not a JSON object.")
-    return payload
-
-
-def run_discovery_codex(prompt: str, *, cwd: Path, model: str | None) -> dict[str, Any]:
-    require_command("codex")
-    with tempfile.TemporaryDirectory(prefix="tracegrep-discovery-schema-") as tmpdir:
-        schema_path = Path(tmpdir) / "discovery_schema.json"
-        output_path = Path(tmpdir) / "discovery_output.json"
-        write_json(schema_path, DISCOVERY_SCHEMA)
-        command = [
-            "codex",
-            "exec",
-            "--skip-git-repo-check",
-            "--ephemeral",
-            "--color",
-            "never",
-            "-s",
-            "read-only",
-            "-C",
-            str(cwd),
-            "--output-schema",
-            str(schema_path),
-            "-o",
-            str(output_path),
-        ]
-        if model:
-            command.extend(["--model", model])
-        command.append(prompt)
-        try:
-            completed = run(command, cwd=cwd, capture_output=True)
-        except subprocess.CalledProcessError as exc:
-            stderr_msg = (exc.stderr or "").strip()
-            raise RuntimeError(
-                f"codex exec failed (exit {exc.returncode}): {stderr_msg}"
-            ) from exc
-        if output_path.exists():
-            raw = output_path.read_text()
-        else:
-            raw = completed.stdout
-    payload = parse_json_output(raw)
-    if not isinstance(payload, dict):
-        raise ValueError("Discovery output was not a JSON object.")
-    return payload
-
-
-def run_discovery_agent(agent: str, prompt: str, *, cwd: Path, model: str | None) -> dict[str, Any]:
-    if agent == "claude":
-        return run_discovery_claude(prompt, cwd=cwd, model=model)
-    if agent == "codex":
-        return run_discovery_codex(prompt, cwd=cwd, model=model)
-    raise SystemExit(f"Unsupported discovery agent: {agent}")
 
 
 def latest_eval_dir(root: Path, task_id: str, agent: str) -> Path:
@@ -1739,17 +868,21 @@ def extract_json_object(text: str) -> Any:
             return value
         except json.JSONDecodeError:
             continue
-    raise ValueError("Could not find a JSON object in command output.")
+    raise ValueError("Could not find a JSON object in judge output.")
 
 
 def unwrap_possible_json_payload(payload: Any) -> Any:
+    if isinstance(payload, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(payload):
+        return payload
     if isinstance(payload, dict):
         for key in ("result", "content", "output", "message", "final", "final_message"):
             if key not in payload:
                 continue
             value = payload[key]
             if isinstance(value, dict):
-                return unwrap_possible_json_payload(value)
+                unwrapped = unwrap_possible_json_payload(value)
+                if isinstance(unwrapped, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(unwrapped):
+                    return unwrapped
             if isinstance(value, str):
                 try:
                     return unwrap_possible_json_payload(json.loads(value))
@@ -1758,29 +891,25 @@ def unwrap_possible_json_payload(payload: Any) -> Any:
         if "messages" in payload and isinstance(payload["messages"], list):
             for item in payload["messages"]:
                 unwrapped = unwrap_possible_json_payload(item)
-                if unwrapped is not item:
+                if isinstance(unwrapped, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(unwrapped):
                     return unwrapped
     if isinstance(payload, list):
         for item in payload:
             unwrapped = unwrap_possible_json_payload(item)
-            if unwrapped is not item:
+            if isinstance(unwrapped, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(unwrapped):
                 return unwrapped
     return payload
 
 
-def parse_json_output(text: str) -> Any:
+def parse_judge_output(text: str) -> dict[str, Any]:
     stripped = text.strip()
     if not stripped:
-        raise ValueError("Command output was empty.")
+        raise ValueError("Judge output was empty.")
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError:
         payload = extract_json_object(stripped)
-    return unwrap_possible_json_payload(payload)
-
-
-def parse_judge_output(text: str) -> dict[str, Any]:
-    payload = parse_json_output(text)
+    payload = unwrap_possible_json_payload(payload)
     if not isinstance(payload, dict):
         raise ValueError("Judge output was not a JSON object.")
     return payload
@@ -1845,18 +974,12 @@ def run_judge_claude(prompt: str, *, cwd: Path, judge_model: str | None) -> dict
     ]
     if judge_model:
         command.extend(["--model", judge_model])
-    command.append(prompt)
-    try:
-        completed = run(
-            command,
-            cwd=cwd,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        stderr_msg = (exc.stderr or "").strip()
-        raise RuntimeError(
-            f"claude exec failed (exit {exc.returncode}): {stderr_msg}"
-        ) from exc
+    completed = run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        input_text=prompt,
+    )
     payload = parse_judge_output(completed.stdout)
     validate_judgment(payload)
     return payload
@@ -1886,18 +1009,13 @@ def run_judge_codex(prompt: str, *, cwd: Path, judge_model: str | None) -> dict[
         ]
         if judge_model:
             command.extend(["--model", judge_model])
-        command.append(prompt)
-        try:
-            completed = run(
-                command,
-                cwd=cwd,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr_msg = (exc.stderr or "").strip()
-            raise RuntimeError(
-                f"codex exec failed (exit {exc.returncode}): {stderr_msg}"
-            ) from exc
+        command.append("-")
+        completed = run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            input_text=prompt,
+        )
         if output_path.exists():
             raw = output_path.read_text()
         else:
@@ -2492,14 +1610,15 @@ def cmd_run_task(
     root: Path,
     *,
     evaluated_agent: str,
+    agent_model: str | None,
     judge_agent: str,
     judge_model: str | None,
-    runtime: str,
     force: bool,
     extra_args: list[str],
 ) -> int:
     task = tasks[task_id]
     eval_id = new_eval_id()
+    build_args = forwarded_build_args(extra_args, agent_model)
 
     print(f"[1/6] preparing {task_id}")
     prepare_task(root, task, force=force)
@@ -2512,10 +1631,9 @@ def cmd_run_task(
             root,
             agent=evaluated_agent,
             condition=condition,
-            runtime=runtime,
             prepare=False,
             force=False,
-            extra_args=extra_args,
+            extra_args=build_args,
         )
         if result != 0:
             print(f"stopping after {condition} launch failed with exit code {result}")
@@ -2566,47 +1684,15 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     show_parser = subparsers.add_parser("show", help="Show details for one task.")
     show_parser.add_argument("task_id", choices=task_ids)
 
-    discover_parser = subparsers.add_parser(
-        "discover",
-        help="Search recent GitHub issue/PR pairs and have codex or claude shortlist benchmark candidates.",
-    )
-    discover_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
-    discover_parser.add_argument("--model")
-    discover_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    discover_parser.add_argument(
-        "--pr-cutoff",
-        type=parse_cli_date,
-        default=default_discovery_pr_cutoff(),
-        help=(
-            "Require merged PRs on or after this date (YYYY-MM-DD). "
-            f"Defaults to {default_discovery_pr_cutoff().isoformat()}, about six months ago."
-        ),
-    )
-    discover_parser.add_argument("--repo-limit", type=int, default=DEFAULT_DISCOVERY_REPO_LIMIT)
-    discover_parser.add_argument("--prs-per-repo", type=int, default=DEFAULT_DISCOVERY_PRS_PER_REPO)
-    discover_parser.add_argument("--pool-size", type=int, default=DEFAULT_DISCOVERY_POOL_SIZE)
-    discover_parser.add_argument("--candidate-count", type=int, default=DEFAULT_DISCOVERY_CANDIDATE_COUNT)
-    discover_parser.add_argument("--min-stars", type=int, default=DEFAULT_DISCOVERY_MIN_STARS)
-    discover_parser.add_argument("--min-size-kb", type=int, default=DEFAULT_DISCOVERY_MIN_SIZE_KB)
-
     prepare_parser = subparsers.add_parser("prepare", help="Prepare one or more tasks.")
     prepare_parser.add_argument("task_ids", nargs="*", choices=task_ids)
     prepare_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     prepare_parser.add_argument("--force", action="store_true", help="Recreate existing generated worktrees.")
 
-    container_build_parser = subparsers.add_parser(
-        "container-build",
-        help="Build the docker image used for containerized implementation runs.",
-    )
-    container_build_parser.add_argument("--image", default=default_docker_image())
-    container_build_parser.add_argument("--dockerfile", type=Path, default=DEFAULT_DOCKERFILE)
-    container_build_parser.add_argument("--no-cache", action="store_true")
-
     launch_parser = subparsers.add_parser("launch", help="Launch a prepared task in codex or claude.")
     launch_parser.add_argument("task_id", choices=task_ids)
     launch_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
     launch_parser.add_argument("--condition", required=True, choices=SUPPORTED_CONDITIONS)
-    launch_parser.add_argument("--runtime", choices=SUPPORTED_RUNTIMES, default="host")
     launch_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     launch_parser.add_argument(
         "--prepare",
@@ -2662,9 +1748,9 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     )
     run_task_parser.add_argument("task_id", choices=task_ids)
     run_task_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    run_task_parser.add_argument("--agent-model")
     run_task_parser.add_argument("--judge-agent", choices=SUPPORTED_AGENTS, default=None)
     run_task_parser.add_argument("--judge-model")
-    run_task_parser.add_argument("--runtime", choices=SUPPORTED_RUNTIMES, default="host")
     run_task_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     run_task_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
 
@@ -2680,28 +1766,8 @@ def main() -> int:
         return cmd_list(tasks)
     if args.command == "show":
         return cmd_show(tasks, args.task_id)
-    if args.command == "discover":
-        return cmd_discover(
-            tasks,
-            args.root,
-            agent=args.agent,
-            model=args.model,
-            pr_cutoff=args.pr_cutoff,
-            repo_limit=args.repo_limit,
-            prs_per_repo=args.prs_per_repo,
-            pool_size=args.pool_size,
-            candidate_count=args.candidate_count,
-            min_stars=args.min_stars,
-            min_size_kb=args.min_size_kb,
-        )
     if args.command == "prepare":
         return cmd_prepare(tasks, args.task_ids, args.root, args.force)
-    if args.command == "container-build":
-        return cmd_container_build(
-            image=args.image,
-            dockerfile=args.dockerfile,
-            no_cache=args.no_cache,
-        )
     if args.command == "launch":
         if extra_args and extra_args[0] == "--":
             extra_args = extra_args[1:]
@@ -2711,7 +1777,6 @@ def main() -> int:
             args.root,
             agent=args.agent,
             condition=args.condition,
-            runtime=args.runtime,
             prepare=args.prepare,
             force=args.force,
             extra_args=extra_args,
@@ -2777,9 +1842,9 @@ def main() -> int:
             args.task_id,
             args.root,
             evaluated_agent=args.agent,
+            agent_model=args.agent_model,
             judge_agent=args.judge_agent or default_judge_agent(),
             judge_model=args.judge_model,
-            runtime=args.runtime,
             force=args.force,
             extra_args=extra_args,
         )

@@ -43,6 +43,13 @@ struct ReferenceSplit {
     test: Vec<ReferenceInfo>,
 }
 
+struct HiddenContextCounts {
+    callers: usize,
+    test_callers: usize,
+    references: usize,
+    test_references: usize,
+}
+
 pub struct QueryOptions<'a> {
     pub json_output: bool,
     pub compact: bool,
@@ -152,8 +159,8 @@ impl Colors {
         out
     }
 
-    fn format_location(&self, file: &str, function: &str, line: usize) -> String {
-        format!("{}:{}:{}", self.path(file), function, self.line(line))
+    fn format_location(&self, file: &str, function: &str) -> String {
+        format!("{}:{}", self.path(file), function)
     }
 
     fn format_caller(&self, caller: &CallerInfo) -> String {
@@ -464,13 +471,6 @@ fn format_compact_section(colors: &Colors, label: &str, entries: &[String]) -> S
     out
 }
 
-struct HiddenContextCounts {
-    callers: usize,
-    test_callers: usize,
-    references: usize,
-    test_references: usize,
-}
-
 fn render_compact_sections(
     colors: &Colors,
     callers: &CallerSplit,
@@ -478,6 +478,10 @@ fn render_compact_sections(
     include_test_callers: bool,
     hidden: &HiddenContextCounts,
 ) -> Vec<String> {
+    let hidden_callers = hidden.callers;
+    let hidden_test_callers = hidden.test_callers;
+    let hidden_references = hidden.references;
+    let hidden_test_references = hidden.test_references;
     let mut sections = Vec::new();
 
     if !callers.primary.is_empty() {
@@ -501,12 +505,12 @@ fn render_compact_sections(
                 .map(|caller| colors.format_caller(caller))
                 .collect::<Vec<_>>(),
         ));
-    } else if let Some(summary) = summarize_hidden_context("test caller", hidden.test_callers)
+    } else if let Some(summary) = summarize_hidden_context("test caller", hidden_test_callers)
         .or_else(|| summarize_hidden_test_callers(callers))
     {
         sections.push(format_compact_section(colors, &summary, &[]));
     }
-    if let Some(summary) = summarize_hidden_context("caller", hidden.callers) {
+    if let Some(summary) = summarize_hidden_context("caller", hidden_callers) {
         sections.push(format_compact_section(colors, &summary, &[]));
     }
 
@@ -520,12 +524,12 @@ fn render_compact_sections(
                 .map(|reference| colors.format_reference(reference))
                 .collect::<Vec<_>>(),
         ));
-    } else if let Some(summary) = summarize_hidden_context("test reference", hidden.test_references)
+    } else if let Some(summary) = summarize_hidden_context("test reference", hidden_test_references)
         .or_else(|| summarize_hidden_test_references(references))
     {
         sections.push(format_compact_section(colors, &summary, &[]));
     }
-    if let Some(summary) = summarize_hidden_context("reference", hidden.references) {
+    if let Some(summary) = summarize_hidden_context("reference", hidden_references) {
         sections.push(format_compact_section(colors, &summary, &[]));
     }
 
@@ -606,8 +610,6 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
     let mut pending_context_lines: Vec<SnippetLine> = Vec::new();
     let mut pending_context_file: Option<String> = None;
     let mut current_block: Option<RenderedBlock> = None;
-    let mut last_rendered_line: usize = 0;
-    let mut last_rendered_file: Option<String> = None;
 
     for line in reader.lines() {
         let line = line?;
@@ -735,7 +737,6 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                 let (_, hidden_test_references) =
                     truncate_context(references.test.clone(), options.max_context);
                 out["function"] = serde_json::json!(node.name);
-                out["function_line"] = serde_json::json!(node.line);
                 out["qualified_name"] = serde_json::json!(node.qualified_name);
                 out["language"] = serde_json::to_value(node.language)?;
                 out["is_test"] = serde_json::json!(node.is_test);
@@ -781,19 +782,11 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
             flush_block(&mut current_block, &colors, &mut timings);
             pending_context_lines.clear();
         }
-        if let Some(block) = &current_block {
-            if let Some(last) = block.code_lines.last() {
-                last_rendered_line = last.line_number;
-                last_rendered_file = Some(block.file.clone());
-            }
-        }
         let mut leading_context = pending_context_lines
             .iter()
             .filter(|context_line| {
                 context_line.line_number < line_number
                     && line_number - context_line.line_number <= context.before
-                    && !(last_rendered_file.as_deref() == Some(file)
-                        && context_line.line_number <= last_rendered_line)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -815,7 +808,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                 references: hidden_references,
                 test_references: hidden_test_references,
             };
-            let mut location = colors.format_location(file, &node.name, node.line);
+            let mut location = colors.format_location(file, &node.name);
             if options.compact {
                 let compact_sections = render_compact_sections(
                     &colors,
