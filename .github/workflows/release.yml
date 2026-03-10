@@ -12,8 +12,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  checks:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
   build:
     name: Build ${{ matrix.target }}
+    needs: checks
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -38,8 +51,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install cargo-zigbuild
-        run: pip3 install cargo-zigbuild
+        run: uv tool install cargo-zigbuild
 
       - name: Build
         run: cargo zigbuild --release --target ${{ matrix.target }}
@@ -51,6 +67,7 @@ jobs:
           dir="tracegrep-${version}-${{ matrix.target }}"
           mkdir "$dir"
           cp "target/${{ matrix.target }}/release/tracegrep" "$dir/"
+          cp "target/${{ matrix.target }}/release/tg" "$dir/"
           cp README.md LICENSE* "$dir/" 2>/dev/null || true
           tar czf "${dir}.tar.gz" "$dir"
 
