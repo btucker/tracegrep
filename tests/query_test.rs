@@ -530,7 +530,7 @@ fn test_query_compact_inlines_context_sections() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(
-        stdout.contains("src/main.rs:validate_body:12")
+        stdout.contains("src/main.rs:validate_body:13")
             && stdout.contains("[Called via:")
             && stdout.contains("[Referenced by:"),
         "stdout:\n{stdout}"
@@ -1120,10 +1120,10 @@ fn test_query_location_header_includes_function_definition_line() {
         "stderr: {}",
         String::from_utf8(output.stderr).unwrap()
     );
-    // validate_body is defined at line 12 in src/main.rs
+    // validate_body is defined at line 13 in src/main.rs
     // The location header should be file:function:line
     assert!(
-        stdout.contains("src/main.rs:validate_body:12"),
+        stdout.contains("src/main.rs:validate_body:13"),
         "location header should include function definition line number.\nstdout:\n{stdout}"
     );
 }
@@ -1131,7 +1131,7 @@ fn test_query_location_header_includes_function_definition_line() {
 #[test]
 fn test_query_json_output_includes_function_line() {
     let dir = create_query_test_repo();
-    let output = run_tracegrep(dir.path(), &["--json", "validate_body"]);
+    let output = run_tracegrep(dir.path(), &["--json", "validating"]);
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -1149,7 +1149,7 @@ fn test_query_json_output_includes_function_line() {
             );
             assert_eq!(
                 parsed["function_line"].as_u64(),
-                Some(12),
+                Some(13),
                 "function_line should be the definition line number.\nline: {line}"
             );
             return;
@@ -1170,7 +1170,7 @@ fn test_query_compact_location_includes_function_definition_line() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(
-        stdout.contains("src/main.rs:validate_body:12"),
+        stdout.contains("src/main.rs:validate_body:13"),
         "compact location header should include function definition line number.\nstdout:\n{stdout}"
     );
 }
