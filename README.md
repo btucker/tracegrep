@@ -1,10 +1,32 @@
 # tracegrep
 
-`tracegrep` layers call-graph context on top of `rg` results.
-
+`tracegrep` layers call-graph context on top of `rg` ([ripgrep](https://github.com/BurntSushi/ripgrep)) results. 
 It exists to give coding agent instant context for how a line of code is used in the codebase. This allows the coding agent to gain a more complete understanding prior to making changes.
+Rust, Python, Typscript & Javascript are currently supported via [treesitter](https://github.com/tree-sitter/tree-sitter).
 
-This repo also includes a Claude Code skill for tracegrep-aware search flow.
+This repo includes a SKILL.md & plugin wrappers for Claude Code, Codex, and Cursor.
+
+`tracegrep` maintains a mostly compatible CLI to `ripgrep`.
+
+`$ rg tool_block`
+```rust
+212:    let blocks = extract_tool_blocks(session_events);
+279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {</code></pre>
+```
+
+`$ tg tool_block`
+```rust
+src/daemon/stream.rs:append_tool_data_effects
+212:    let blocks = extract_tool_blocks(session_events);
+  Called via:
+    src/daemon/stream.rs:process_lead_output:110  (when events.get(main_lead_session_name) is Some(lead_events) && ...)
+
+src/daemon/stream.rs:extract_tool_blocks
+279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {
+  Called via:
+    src/daemon/stream.rs:append_tool_data_effects:206
+    src/daemon/stream.rs:process_agent_output:552  (when events.get(name.as_str()) is Some(coworker_events))
+```
 
 ## Installation
 
@@ -108,36 +130,6 @@ tg tool_data src tests
 tg --generate complete-zsh
 ```
 
-## Example output
-
-Same search, `rg` vs `tg` — tracegrep shows which function contains each
-match and where it is called from:
-
-<table>
-  <tr>
-    <th><code>rg "tool_block"</code></th>
-    <th><code>tg "tool_block"</code></th>
-  </tr>
-  <tr>
-    <td valign="top">
-      <pre lang="text"><code>src/daemon/stream.rs
-212:    let blocks = extract_tool_blocks(session_events);
-279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {</code></pre>
-    </td>
-    <td valign="top">
-      <pre lang="text"><code>src/daemon/stream.rs:append_tool_data_effects
-212:    let blocks = extract_tool_blocks(session_events);
-  Called via:
-    src/daemon/stream.rs:process_lead_output:110  (when events.get(main_lead_session_name) is Some(lead_events) && ...)
-
-src/daemon/stream.rs:extract_tool_blocks
-279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {
-  Called via:
-    src/daemon/stream.rs:append_tool_data_effects:206
-    src/daemon/stream.rs:process_agent_output:552  (when events.get(name.as_str()) is Some(coworker_events))</code></pre>
-    </td>
-  </tr>
-</table>
 
 ## Notes
 
@@ -151,14 +143,3 @@ src/daemon/stream.rs:extract_tool_blocks
 - The call graph is rebuilt automatically when the relevant per-language cache is missing or its stored `HEAD` no longer matches the repo.
 - Function references passed as arguments are shown separately from direct callers.
 - The current resolver is heuristic and language-local; it does not attempt import-aware or type-aware cross-file analysis.
-
-## Claude Code skill
-
-The repository ships a Claude Code skill under `skills/tracegrep/`.
-
-The `tracegrep` skill tells the agent to:
-
-- prefer tracegrep-aware search instead of raw shell `rg`
-- use `--json` only when structured output is needed
-- fall back to `tracegrep` or `cargo run --` if needed
-- use plain `rg` or `grep` only when the user explicitly asks for them or the search target is outside tracegrep's model
