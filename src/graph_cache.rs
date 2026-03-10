@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -7,10 +9,12 @@ use sha2::{Digest, Sha256};
 
 use crate::analysis;
 use crate::analysis::codepaths::{self, merge_graphs, CallGraph, FileArtifact, Language};
+use crate::query_data::QueryCachePayload;
+use crate::timing::TimingCollector;
 
 const CACHE_DIR_ENV: &str = "TRACEGREP_CACHE_DIR";
 const CACHE_DIR: &str = ".cache/tracegrep";
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadGraphMode {
@@ -30,6 +34,11 @@ pub struct LoadGraphResult {
     pub outcome: LoadGraphOutcome,
 }
 
+pub struct LoadQueryResult {
+    pub payload: QueryCachePayload,
+    pub outcome: LoadGraphOutcome,
+}
+
 #[derive(Serialize, Deserialize)]
 struct CacheState {
     schema_version: u32,
@@ -40,9 +49,53 @@ struct CacheState {
     files: BTreeMap<String, FileArtifact>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StateMetadata {
+    schema_version: u32,
+    repo_path: String,
+    include_tests: bool,
+    language: Language,
+    head: String,
+    content_fingerprint: String,
+    file_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QueryCacheMetadata {
+    schema_version: u32,
+    repo_path: String,
+    include_tests: bool,
+    head: String,
+    state_fingerprint: String,
+}
+
 struct LanguageLoadResult {
     graph: CallGraph,
+    state_meta: StateMetadata,
     outcome: LoadGraphOutcome,
+}
+
+struct LanguageCachePlan {
+    language: Language,
+    current_files: BTreeMap<String, PathBuf>,
+    state_meta: Option<StateMetadata>,
+    action: LanguageCacheAction,
+}
+
+enum LanguageCacheAction {
+    Skip,
+    Reuse,
+    RefreshHeadOnly,
+    Incremental { changed_files: Vec<String> },
+    FullRebuild,
+}
+
+struct RepoStatusSnapshot {
+    current_head: String,
+    shared_previous_head: Option<String>,
+    committed_paths: Vec<String>,
+    dirty_paths: Vec<String>,
+    untracked_paths: Vec<String>,
 }
 
 fn empty_graph() -> CallGraph {
@@ -109,6 +162,32 @@ pub fn state_cache_path(
     )))
 }
 
+pub fn state_metadata_path(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+) -> anyhow::Result<PathBuf> {
+    let cache_dir = repo_cache_dir(repo_path)?;
+    let suffix = if include_tests { "with-tests" } else { "prod" };
+    Ok(cache_dir.join(format!(
+        "codepaths.v{SCHEMA_VERSION}.{}.{}.state-meta.json",
+        language.cache_key(),
+        suffix
+    )))
+}
+
+pub fn query_cache_path(repo_path: &Path, include_tests: bool) -> anyhow::Result<PathBuf> {
+    let cache_dir = repo_cache_dir(repo_path)?;
+    let suffix = if include_tests { "with-tests" } else { "prod" };
+    Ok(cache_dir.join(format!("query-cache.v{SCHEMA_VERSION}.{suffix}.bin")))
+}
+
+pub fn query_cache_metadata_path(repo_path: &Path, include_tests: bool) -> anyhow::Result<PathBuf> {
+    let cache_dir = repo_cache_dir(repo_path)?;
+    let suffix = if include_tests { "with-tests" } else { "prod" };
+    Ok(cache_dir.join(format!("query-cache.v{SCHEMA_VERSION}.{suffix}.meta.json")))
+}
+
 fn head_hash(repo_path: &Path) -> anyhow::Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -124,10 +203,13 @@ fn read_graph(
     repo_path: &Path,
     include_tests: bool,
     language: Language,
+    timings: &mut TimingCollector,
 ) -> anyhow::Result<CallGraph> {
     let path = graph_cache_path(repo_path, include_tests, language)?;
-    let data = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&data)?)
+    timings.measure("graph_read", || -> anyhow::Result<CallGraph> {
+        let file = File::open(path)?;
+        Ok(serde_json::from_reader(BufReader::new(file))?)
+    })
 }
 
 fn write_graph(
@@ -140,7 +222,8 @@ fn write_graph(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string(graph)?)?;
+    let file = File::create(path)?;
+    serde_json::to_writer(BufWriter::new(file), graph)?;
     Ok(())
 }
 
@@ -148,10 +231,13 @@ fn read_state(
     repo_path: &Path,
     include_tests: bool,
     language: Language,
+    timings: &mut TimingCollector,
 ) -> anyhow::Result<CacheState> {
     let path = state_cache_path(repo_path, include_tests, language)?;
-    let data = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&data)?)
+    timings.measure("state_read", || -> anyhow::Result<CacheState> {
+        let file = File::open(path)?;
+        Ok(serde_json::from_reader(BufReader::new(file))?)
+    })
 }
 
 fn write_state(
@@ -159,13 +245,161 @@ fn write_state(
     include_tests: bool,
     language: Language,
     state: &CacheState,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<StateMetadata> {
     let path = state_cache_path(repo_path, include_tests, language)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string(state)?)?;
+    let file = File::create(path)?;
+    serde_json::to_writer(BufWriter::new(file), state)?;
+
+    let meta = state_metadata_from_state(state);
+    write_state_metadata(repo_path, include_tests, language, &meta)?;
+    Ok(meta)
+}
+
+fn read_state_metadata(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+    timings: &mut TimingCollector,
+) -> anyhow::Result<StateMetadata> {
+    let path = state_metadata_path(repo_path, include_tests, language)?;
+    timings.measure("state_read", || -> anyhow::Result<StateMetadata> {
+        let file = File::open(path)?;
+        Ok(serde_json::from_reader(BufReader::new(file))?)
+    })
+}
+
+fn write_state_metadata(
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+    meta: &StateMetadata,
+) -> anyhow::Result<()> {
+    let path = state_metadata_path(repo_path, include_tests, language)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = File::create(path)?;
+    serde_json::to_writer(BufWriter::new(file), meta)?;
     Ok(())
+}
+
+fn read_query_cache_metadata(
+    repo_path: &Path,
+    include_tests: bool,
+    timings: &mut TimingCollector,
+) -> anyhow::Result<QueryCacheMetadata> {
+    let path = query_cache_metadata_path(repo_path, include_tests)?;
+    timings.measure(
+        "query_cache_read",
+        || -> anyhow::Result<QueryCacheMetadata> {
+            let file = File::open(path)?;
+            Ok(serde_json::from_reader(BufReader::new(file))?)
+        },
+    )
+}
+
+fn write_query_cache_metadata(
+    repo_path: &Path,
+    include_tests: bool,
+    meta: &QueryCacheMetadata,
+) -> anyhow::Result<()> {
+    let path = query_cache_metadata_path(repo_path, include_tests)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = File::create(path)?;
+    serde_json::to_writer(BufWriter::new(file), meta)?;
+    Ok(())
+}
+
+fn read_query_cache_payload(
+    repo_path: &Path,
+    include_tests: bool,
+    timings: &mut TimingCollector,
+) -> anyhow::Result<QueryCachePayload> {
+    let path = query_cache_path(repo_path, include_tests)?;
+    timings.measure(
+        "query_cache_read",
+        || -> anyhow::Result<QueryCachePayload> {
+            let file = File::open(path)?;
+            Ok(bincode::deserialize_from(BufReader::new(file))?)
+        },
+    )
+}
+
+fn write_query_cache_payload(
+    repo_path: &Path,
+    include_tests: bool,
+    payload: &QueryCachePayload,
+) -> anyhow::Result<()> {
+    let path = query_cache_path(repo_path, include_tests)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = File::create(path)?;
+    bincode::serialize_into(BufWriter::new(file), payload)?;
+    Ok(())
+}
+
+fn state_metadata_from_state(state: &CacheState) -> StateMetadata {
+    StateMetadata {
+        schema_version: SCHEMA_VERSION,
+        repo_path: state.repo_path.clone(),
+        include_tests: state.include_tests,
+        language: state.language,
+        head: state.head.clone(),
+        content_fingerprint: files_fingerprint(&state.files),
+        file_count: state.files.len(),
+    }
+}
+
+fn files_fingerprint(files: &BTreeMap<String, FileArtifact>) -> String {
+    let mut hasher = Sha256::new();
+    for (path, artifact) in files {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(artifact.source_hash.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    hex_hash(digest.as_slice())
+}
+
+fn combined_state_fingerprint(metas: &[StateMetadata]) -> String {
+    let mut hasher = Sha256::new();
+    for meta in metas {
+        hasher.update(meta.language.cache_key().as_bytes());
+        hasher.update([0]);
+        hasher.update(meta.content_fingerprint.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    hex_hash(digest.as_slice())
+}
+
+fn compatible_state_metadata(
+    meta: &StateMetadata,
+    repo_path: &Path,
+    include_tests: bool,
+    language: Language,
+) -> bool {
+    meta.schema_version == SCHEMA_VERSION
+        && meta.repo_path == repo_path.display().to_string()
+        && meta.include_tests == include_tests
+        && meta.language == language
+}
+
+fn compatible_query_metadata(
+    meta: &QueryCacheMetadata,
+    repo_path: &Path,
+    include_tests: bool,
+) -> bool {
+    meta.schema_version == SCHEMA_VERSION
+        && meta.repo_path == repo_path.display().to_string()
+        && meta.include_tests == include_tests
 }
 
 fn is_relevant_path(path: &str, include_tests: bool, language: Language) -> bool {
@@ -184,7 +418,7 @@ fn run_git_bytes(repo_path: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-fn parse_name_status_z(output: &[u8], include_tests: bool, language: Language) -> Vec<String> {
+fn parse_name_status_z(output: &[u8]) -> Vec<String> {
     let mut parts = output
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty());
@@ -199,78 +433,110 @@ fn parse_name_status_z(output: &[u8], include_tests: bool, language: Language) -
             let Some(new_path) = parts.next() else {
                 break;
             };
-            let old_path = String::from_utf8_lossy(old_path).into_owned();
-            let new_path = String::from_utf8_lossy(new_path).into_owned();
-            if is_relevant_path(&old_path, include_tests, language) {
-                changed.push(old_path);
-            }
-            if is_relevant_path(&new_path, include_tests, language) {
-                changed.push(new_path);
-            }
+            changed.push(String::from_utf8_lossy(old_path).into_owned());
+            changed.push(String::from_utf8_lossy(new_path).into_owned());
             continue;
         }
 
         let Some(path) = parts.next() else {
             break;
         };
-        let path = String::from_utf8_lossy(path).into_owned();
-        if is_relevant_path(&path, include_tests, language) {
-            changed.push(path);
-        }
+        changed.push(String::from_utf8_lossy(path).into_owned());
     }
 
     changed
 }
 
-fn committed_changed_paths(
+fn collect_repo_status_snapshot(
     repo_path: &Path,
-    previous_head: &str,
     current_head: &str,
-    include_tests: bool,
-    language: Language,
-) -> anyhow::Result<Vec<String>> {
-    if previous_head == current_head {
-        return Ok(Vec::new());
-    }
+    shared_previous_head: Option<&str>,
+    timings: &mut TimingCollector,
+) -> anyhow::Result<RepoStatusSnapshot> {
+    timings.measure("freshness_git", || -> anyhow::Result<RepoStatusSnapshot> {
+        let committed_paths = if let Some(previous_head) = shared_previous_head {
+            if previous_head == current_head {
+                Vec::new()
+            } else {
+                parse_name_status_z(&run_git_bytes(
+                    repo_path,
+                    &[
+                        "diff",
+                        "--name-status",
+                        "-z",
+                        previous_head,
+                        current_head,
+                        "--",
+                    ],
+                )?)
+            }
+        } else {
+            Vec::new()
+        };
 
-    let output = run_git_bytes(
-        repo_path,
-        &[
-            "diff",
-            "--name-status",
-            "-z",
-            previous_head,
-            current_head,
-            "--",
-        ],
-    )?;
-    Ok(parse_name_status_z(&output, include_tests, language))
+        let dirty_paths = parse_name_status_z(&run_git_bytes(
+            repo_path,
+            &["diff", "--name-status", "-z", "HEAD", "--"],
+        )?);
+        let untracked_paths = run_git_bytes(
+            repo_path,
+            &["ls-files", "--others", "--exclude-standard", "-z", "--"],
+        )?
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .filter_map(|path| String::from_utf8(path.to_vec()).ok())
+        .collect();
+
+        Ok(RepoStatusSnapshot {
+            current_head: current_head.to_string(),
+            shared_previous_head: shared_previous_head.map(str::to_string),
+            committed_paths,
+            dirty_paths,
+            untracked_paths,
+        })
+    })
 }
 
-fn dirty_changed_paths(
-    repo_path: &Path,
-    include_tests: bool,
-    language: Language,
-) -> anyhow::Result<Vec<String>> {
-    let mut changed = parse_name_status_z(
-        &run_git_bytes(repo_path, &["diff", "--name-status", "-z", "HEAD", "--"])?,
-        include_tests,
-        language,
-    );
+impl RepoStatusSnapshot {
+    fn changed_files_for(
+        &self,
+        state_head: &str,
+        include_tests: bool,
+        language: Language,
+    ) -> Option<Vec<String>> {
+        let mut changed = Vec::new();
 
-    let untracked = run_git_bytes(
-        repo_path,
-        &["ls-files", "--others", "--exclude-standard", "-z", "--"],
-    )?;
-    changed.extend(
-        untracked
-            .split(|byte| *byte == 0)
-            .filter(|part| !part.is_empty())
-            .filter_map(|path| String::from_utf8(path.to_vec()).ok())
-            .filter(|path| is_relevant_path(path, include_tests, language)),
-    );
+        for path in &self.dirty_paths {
+            if is_relevant_path(path, include_tests, language) {
+                changed.push(path.clone());
+            }
+        }
+        for path in &self.untracked_paths {
+            if is_relevant_path(path, include_tests, language) {
+                changed.push(path.clone());
+            }
+        }
 
-    Ok(changed)
+        if state_head == self.current_head {
+            changed.sort();
+            changed.dedup();
+            return Some(changed);
+        }
+
+        if self.shared_previous_head.as_deref() != Some(state_head) {
+            return None;
+        }
+
+        for path in &self.committed_paths {
+            if is_relevant_path(path, include_tests, language) {
+                changed.push(path.clone());
+            }
+        }
+
+        changed.sort();
+        changed.dedup();
+        Some(changed)
+    }
 }
 
 fn build_file_artifact(
@@ -289,19 +555,17 @@ fn build_file_artifact(
 }
 
 fn build_all_artifacts(
-    repo_path: &Path,
+    current_files: &BTreeMap<String, PathBuf>,
     include_tests: bool,
     language: Language,
 ) -> anyhow::Result<BTreeMap<String, FileArtifact>> {
     let mut parser = codepaths::new_parser(language)?;
     let mut files = BTreeMap::new();
 
-    for (relative_path, path) in
-        codepaths::collect_relevant_files_for_language(repo_path, include_tests, language)
-    {
+    for (relative_path, path) in current_files {
         files.insert(
             relative_path.clone(),
-            build_file_artifact(&relative_path, &path, include_tests, language, &mut parser)?,
+            build_file_artifact(relative_path, path, include_tests, language, &mut parser)?,
         );
     }
 
@@ -313,14 +577,18 @@ fn full_rebuild_language(
     include_tests: bool,
     current_head: &str,
     language: Language,
+    current_files: &BTreeMap<String, PathBuf>,
+    timings: &mut TimingCollector,
 ) -> anyhow::Result<LanguageLoadResult> {
     eprintln!("Building {} graph...", language.display_name());
-    let files = build_all_artifacts(repo_path, include_tests, language)?;
-    let graph = codepaths::build_graph_from_artifacts(&files);
+    let files = build_all_artifacts(current_files, include_tests, language)?;
+    let graph = timings.measure("graph_rebuild", || {
+        codepaths::build_graph_from_artifacts(&files)
+    });
     let changed_files = files.keys().cloned().collect::<Vec<_>>();
 
     write_graph(repo_path, include_tests, language, &graph)?;
-    write_state(
+    let state_meta = write_state(
         repo_path,
         include_tests,
         language,
@@ -336,6 +604,7 @@ fn full_rebuild_language(
 
     Ok(LanguageLoadResult {
         graph,
+        state_meta,
         outcome: LoadGraphOutcome {
             mode: LoadGraphMode::FullRebuild,
             changed_files,
@@ -348,12 +617,39 @@ fn incremental_rebuild_language(
     include_tests: bool,
     current_head: &str,
     language: Language,
-    mut state: CacheState,
+    current_files: &BTreeMap<String, PathBuf>,
     changed_files: &[String],
+    timings: &mut TimingCollector,
 ) -> anyhow::Result<LanguageLoadResult> {
+    let mut state = match read_state(repo_path, include_tests, language, timings) {
+        Ok(state) => state,
+        Err(_) => {
+            return full_rebuild_language(
+                repo_path,
+                include_tests,
+                current_head,
+                language,
+                current_files,
+                timings,
+            )
+        }
+    };
+    if state.schema_version != SCHEMA_VERSION
+        || state.repo_path != repo_path.display().to_string()
+        || state.include_tests != include_tests
+        || state.language != language
+    {
+        return full_rebuild_language(
+            repo_path,
+            include_tests,
+            current_head,
+            language,
+            current_files,
+            timings,
+        );
+    }
+
     let mut parser = codepaths::new_parser(language)?;
-    let current_files =
-        codepaths::collect_relevant_files_for_language(repo_path, include_tests, language);
 
     for removed in state
         .files
@@ -375,11 +671,12 @@ fn incremental_rebuild_language(
         }
     }
 
-    let graph = codepaths::build_graph_from_artifacts(&state.files);
     state.head = current_head.to_string();
-
+    let graph = timings.measure("graph_rebuild", || {
+        codepaths::build_graph_from_artifacts(&state.files)
+    });
+    let state_meta = write_state(repo_path, include_tests, language, &state)?;
     write_graph(repo_path, include_tests, language, &graph)?;
-    write_state(repo_path, include_tests, language, &state)?;
     eprintln!(
         "Incrementally rebuilding {} graph ({} changed file{})",
         language.display_name(),
@@ -389,6 +686,7 @@ fn incremental_rebuild_language(
 
     Ok(LanguageLoadResult {
         graph,
+        state_meta,
         outcome: LoadGraphOutcome {
             mode: LoadGraphMode::Incremental,
             changed_files: changed_files.to_vec(),
@@ -396,108 +694,255 @@ fn incremental_rebuild_language(
     })
 }
 
-fn load_or_build_graph_for_language(
+fn read_language_state_metadata(
+    repo_path: &Path,
+    include_tests: bool,
+    timings: &mut TimingCollector,
+) -> BTreeMap<Language, Option<StateMetadata>> {
+    let mut metas = BTreeMap::new();
+    for language in Language::ALL {
+        let meta = read_state_metadata(repo_path, include_tests, language, timings).ok();
+        metas.insert(language, meta);
+    }
+    metas
+}
+
+fn shared_previous_head(
+    metas: &BTreeMap<Language, Option<StateMetadata>>,
+    current_head: &str,
+) -> Option<String> {
+    let distinct_heads = metas
+        .values()
+        .filter_map(|meta| meta.as_ref())
+        .filter(|meta| meta.head != current_head)
+        .map(|meta| meta.head.clone())
+        .collect::<BTreeSet<_>>();
+
+    if distinct_heads.len() == 1 {
+        distinct_heads.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn build_language_plans(
     repo_path: &Path,
     include_tests: bool,
     current_head: &str,
-    language: Language,
-) -> anyhow::Result<Option<LanguageLoadResult>> {
-    let current_files =
-        codepaths::collect_relevant_files_for_language(repo_path, include_tests, language);
-    let state = read_state(repo_path, include_tests, language);
-    let graph = read_graph(repo_path, include_tests, language);
-    let has_cache = state.is_ok() || graph.is_ok();
+    current_files_by_language: BTreeMap<Language, BTreeMap<String, PathBuf>>,
+    state_metas: BTreeMap<Language, Option<StateMetadata>>,
+    snapshot: &RepoStatusSnapshot,
+) -> Vec<LanguageCachePlan> {
+    let mut plans = Vec::new();
 
-    if current_files.is_empty() && !has_cache {
-        return Ok(None);
-    }
+    for language in Language::ALL {
+        let current_files = current_files_by_language
+            .get(&language)
+            .cloned()
+            .unwrap_or_default();
+        let state_meta = state_metas
+            .get(&language)
+            .cloned()
+            .flatten()
+            .filter(|meta| compatible_state_metadata(meta, repo_path, include_tests, language));
 
-    let (mut state, graph) = match (state, graph) {
-        (Ok(state), Ok(graph))
-            if state.schema_version == SCHEMA_VERSION
-                && state.repo_path == repo_path.display().to_string()
-                && state.include_tests == include_tests
-                && state.language == language =>
-        {
-            (state, graph)
-        }
-        _ => {
-            return Ok(Some(full_rebuild_language(
-                repo_path,
-                include_tests,
-                current_head,
-                language,
-            )?))
-        }
-    };
-
-    let mut changed_files = committed_changed_paths(
-        repo_path,
-        &state.head,
-        current_head,
-        include_tests,
-        language,
-    )?;
-    changed_files.extend(dirty_changed_paths(repo_path, include_tests, language)?);
-    changed_files.extend(
-        state
-            .files
-            .keys()
-            .filter(|path| !current_files.contains_key(*path))
-            .cloned(),
-    );
-    changed_files.extend(
-        current_files
-            .keys()
-            .filter(|path| !state.files.contains_key(*path))
-            .cloned(),
-    );
-    changed_files.sort();
-    changed_files.dedup();
-
-    if changed_files.is_empty() {
-        if state.head != current_head {
-            state.head = current_head.to_string();
-            write_state(repo_path, include_tests, language, &state)?;
-            eprintln!(
-                "Reusing cached {} graph (HEAD changed, no relevant source changes)",
-                language.display_name()
-            );
-        } else {
-            eprintln!("Reusing cached {} graph", language.display_name());
-        }
-        return Ok(Some(LanguageLoadResult {
-            graph,
-            outcome: LoadGraphOutcome {
-                mode: LoadGraphMode::Reused,
-                changed_files,
+        let action = match &state_meta {
+            None if current_files.is_empty() => LanguageCacheAction::Skip,
+            None => LanguageCacheAction::FullRebuild,
+            Some(meta) => match snapshot.changed_files_for(&meta.head, include_tests, language) {
+                None => LanguageCacheAction::FullRebuild,
+                Some(changed_files) if changed_files.is_empty() => {
+                    if meta.head == current_head {
+                        LanguageCacheAction::Reuse
+                    } else {
+                        LanguageCacheAction::RefreshHeadOnly
+                    }
+                }
+                Some(changed_files) => LanguageCacheAction::Incremental { changed_files },
             },
-        }));
+        };
+
+        plans.push(LanguageCachePlan {
+            language,
+            current_files,
+            state_meta,
+            action,
+        });
     }
 
-    Ok(Some(incremental_rebuild_language(
-        repo_path,
-        include_tests,
-        current_head,
-        language,
-        state,
-        &changed_files,
-    )?))
+    plans
 }
 
-pub fn load_or_build_graph(
+fn write_refreshed_metadata_heads(
     repo_path: &Path,
     include_tests: bool,
-) -> anyhow::Result<LoadGraphResult> {
-    let current_head = head_hash(repo_path)?;
+    current_head: &str,
+    plans: &[LanguageCachePlan],
+) -> anyhow::Result<Vec<StateMetadata>> {
+    let mut metas = Vec::new();
+    for plan in plans {
+        match (&plan.action, &plan.state_meta) {
+            (LanguageCacheAction::Skip, _) => {}
+            (LanguageCacheAction::Reuse, Some(meta)) => metas.push(meta.clone()),
+            (LanguageCacheAction::RefreshHeadOnly, Some(meta)) => {
+                let mut refreshed = meta.clone();
+                refreshed.head = current_head.to_string();
+                write_state_metadata(repo_path, include_tests, plan.language, &refreshed)?;
+                metas.push(refreshed);
+            }
+            _ => {}
+        }
+    }
+    metas.sort_by_key(|meta| meta.language);
+    Ok(metas)
+}
+
+fn query_cache_metadata_from(
+    repo_path: &Path,
+    include_tests: bool,
+    current_head: &str,
+    state_fingerprint: String,
+) -> QueryCacheMetadata {
+    QueryCacheMetadata {
+        schema_version: SCHEMA_VERSION,
+        repo_path: repo_path.display().to_string(),
+        include_tests,
+        head: current_head.to_string(),
+        state_fingerprint,
+    }
+}
+
+fn load_or_build_query_cache_impl(
+    repo_path: &Path,
+    include_tests: bool,
+    timings: &mut TimingCollector,
+) -> anyhow::Result<LoadQueryResult> {
+    let current_head = timings.measure("head_hash", || head_hash(repo_path))?;
+    let current_files_by_language = timings.measure("source_scan", || {
+        codepaths::collect_relevant_source_files(repo_path, include_tests)
+    });
+    let state_metas = read_language_state_metadata(repo_path, include_tests, timings);
+    let shared_previous_head = shared_previous_head(&state_metas, &current_head);
+    let snapshot = collect_repo_status_snapshot(
+        repo_path,
+        &current_head,
+        shared_previous_head.as_deref(),
+        timings,
+    )?;
+    let plans = build_language_plans(
+        repo_path,
+        include_tests,
+        &current_head,
+        current_files_by_language,
+        state_metas,
+        &snapshot,
+    );
+
+    let can_reuse_query_cache = plans.iter().all(|plan| {
+        matches!(
+            plan.action,
+            LanguageCacheAction::Skip
+                | LanguageCacheAction::Reuse
+                | LanguageCacheAction::RefreshHeadOnly
+        )
+    });
+
+    if can_reuse_query_cache {
+        let effective_state_metas =
+            write_refreshed_metadata_heads(repo_path, include_tests, &current_head, &plans)?;
+        let state_fingerprint = combined_state_fingerprint(&effective_state_metas);
+        if let Ok(meta) = read_query_cache_metadata(repo_path, include_tests, timings) {
+            if compatible_query_metadata(&meta, repo_path, include_tests)
+                && meta.state_fingerprint == state_fingerprint
+            {
+                if let Ok(payload) = read_query_cache_payload(repo_path, include_tests, timings) {
+                    if meta.head != current_head {
+                        write_query_cache_metadata(
+                            repo_path,
+                            include_tests,
+                            &query_cache_metadata_from(
+                                repo_path,
+                                include_tests,
+                                &current_head,
+                                state_fingerprint,
+                            ),
+                        )?;
+                    }
+                    return Ok(LoadQueryResult {
+                        payload,
+                        outcome: LoadGraphOutcome {
+                            mode: LoadGraphMode::Reused,
+                            changed_files: Vec::new(),
+                        },
+                    });
+                }
+            }
+        }
+    }
+
     let mut graphs = Vec::new();
+    let mut state_metas = Vec::new();
     let mut changed_files = Vec::new();
     let mut mode = LoadGraphMode::Reused;
 
-    for language in Language::ALL {
-        let Some(result) =
-            load_or_build_graph_for_language(repo_path, include_tests, &current_head, language)?
-        else {
+    for plan in plans {
+        let result = match plan.action {
+            LanguageCacheAction::Skip => None,
+            LanguageCacheAction::Reuse | LanguageCacheAction::RefreshHeadOnly => {
+                match read_graph(repo_path, include_tests, plan.language, timings) {
+                    Ok(graph) => {
+                        let mut state_meta =
+                            plan.state_meta.expect("reused cache missing metadata");
+                        if matches!(plan.action, LanguageCacheAction::RefreshHeadOnly) {
+                            state_meta.head = current_head.clone();
+                            write_state_metadata(
+                                repo_path,
+                                include_tests,
+                                plan.language,
+                                &state_meta,
+                            )?;
+                        }
+                        Some(LanguageLoadResult {
+                            graph,
+                            state_meta,
+                            outcome: LoadGraphOutcome {
+                                mode: LoadGraphMode::Reused,
+                                changed_files: Vec::new(),
+                            },
+                        })
+                    }
+                    Err(_) => Some(full_rebuild_language(
+                        repo_path,
+                        include_tests,
+                        &current_head,
+                        plan.language,
+                        &plan.current_files,
+                        timings,
+                    )?),
+                }
+            }
+            LanguageCacheAction::Incremental {
+                changed_files: planned_changed_files,
+            } => Some(incremental_rebuild_language(
+                repo_path,
+                include_tests,
+                &current_head,
+                plan.language,
+                &plan.current_files,
+                &planned_changed_files,
+                timings,
+            )?),
+            LanguageCacheAction::FullRebuild => Some(full_rebuild_language(
+                repo_path,
+                include_tests,
+                &current_head,
+                plan.language,
+                &plan.current_files,
+                timings,
+            )?),
+        };
+
+        let Some(result) = result else {
             continue;
         };
 
@@ -507,23 +952,58 @@ pub fn load_or_build_graph(
         {
             graphs.push(result.graph);
         }
+        state_metas.push(result.state_meta);
         changed_files.extend(result.outcome.changed_files);
         mode = merge_mode(mode, result.outcome.mode);
     }
 
+    state_metas.sort_by_key(|meta| meta.language);
     changed_files.sort();
     changed_files.dedup();
 
-    Ok(LoadGraphResult {
-        graph: if graphs.is_empty() {
-            empty_graph()
-        } else {
-            merge_graphs(&graphs)
-        },
+    let merged_graph = if graphs.is_empty() {
+        empty_graph()
+    } else {
+        timings.measure("merge_graphs", || merge_graphs(&graphs))
+    };
+    let payload = timings.measure("derived_index_build", || {
+        QueryCachePayload::from_graph(merged_graph)
+    });
+    let state_fingerprint = combined_state_fingerprint(&state_metas);
+
+    write_query_cache_payload(repo_path, include_tests, &payload)?;
+    write_query_cache_metadata(
+        repo_path,
+        include_tests,
+        &query_cache_metadata_from(repo_path, include_tests, &current_head, state_fingerprint),
+    )?;
+
+    Ok(LoadQueryResult {
+        payload,
         outcome: LoadGraphOutcome {
             mode,
             changed_files,
         },
+    })
+}
+
+pub fn load_or_build_query_cache(
+    repo_path: &Path,
+    include_tests: bool,
+    timings: &mut TimingCollector,
+) -> anyhow::Result<LoadQueryResult> {
+    load_or_build_query_cache_impl(repo_path, include_tests, timings)
+}
+
+pub fn load_or_build_graph(
+    repo_path: &Path,
+    include_tests: bool,
+) -> anyhow::Result<LoadGraphResult> {
+    let mut timings = TimingCollector::disabled();
+    let result = load_or_build_query_cache_impl(repo_path, include_tests, &mut timings)?;
+    Ok(LoadGraphResult {
+        graph: result.payload.graph.clone(),
+        outcome: result.outcome,
     })
 }
 

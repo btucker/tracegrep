@@ -3,11 +3,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 pub struct Cli {
+    pub build_index: bool,
     pub json: bool,
     pub compact: bool,
     pub repo: String,
     pub search_paths: Vec<String>,
     pub depth: usize,
+    pub max_context: usize,
     pub include_tests: bool,
     pub include_test_callers: bool,
     pub pattern: String,
@@ -31,11 +33,13 @@ impl Cli {
         }
 
         let mut cli = Cli {
+            build_index: false,
             json: false,
             compact: false,
             repo: ".".to_string(),
             search_paths: Vec::new(),
             depth: 1,
+            max_context: 5,
             include_tests: false,
             include_test_callers: false,
             pattern: String::new(),
@@ -55,6 +59,11 @@ impl Cli {
                     }
                     "--json" => {
                         cli.json = true;
+                        idx += 1;
+                        continue;
+                    }
+                    "--build-index" => {
+                        cli.build_index = true;
                         idx += 1;
                         continue;
                     }
@@ -84,6 +93,17 @@ impl Cli {
                         idx += 1;
                         continue;
                     }
+                    "--max-context" => {
+                        idx += 1;
+                        let value = args
+                            .get(idx)
+                            .ok_or_else(|| anyhow::anyhow!("missing value for --max-context"))?;
+                        cli.max_context = value.parse().map_err(|_| {
+                            anyhow::anyhow!("invalid value for --max-context: {value}")
+                        })?;
+                        idx += 1;
+                        continue;
+                    }
                     _ => {}
                 }
             }
@@ -94,19 +114,34 @@ impl Cli {
         if cli.json && cli.compact {
             anyhow::bail!("--compact cannot be used together with --json");
         }
+        if cli.build_index && (cli.json || cli.compact || cli.include_test_callers) {
+            anyhow::bail!(
+                "--build-index cannot be used with --json, --compact, or --include-test-callers"
+            );
+        }
 
-        let ParsedPassthrough {
-            pattern,
-            search_paths,
-            rg_args,
-        } = parse_passthrough(&passthrough, after_delimiter)?;
-        cli.pattern = pattern;
-        cli.rg_args = rg_args;
+        if cli.build_index {
+            if passthrough.iter().any(|arg| arg.starts_with('-')) {
+                anyhow::bail!("--build-index accepts only optional path arguments");
+            }
+            if !passthrough.is_empty() {
+                let (repo, _relative_paths) = infer_multi_path_repo_and_paths(&passthrough)?;
+                cli.repo = repo;
+            }
+        } else {
+            let ParsedPassthrough {
+                pattern,
+                search_paths,
+                rg_args,
+            } = parse_passthrough(&passthrough, after_delimiter)?;
+            cli.pattern = pattern;
+            cli.rg_args = rg_args;
 
-        if !search_paths.is_empty() {
-            let (repo, relative_paths) = infer_multi_path_repo_and_paths(&search_paths)?;
-            cli.repo = repo;
-            cli.search_paths = relative_paths;
+            if !search_paths.is_empty() {
+                let (repo, relative_paths) = infer_multi_path_repo_and_paths(&search_paths)?;
+                cli.repo = repo;
+                cli.search_paths = relative_paths;
+            }
         }
 
         Ok(cli)
@@ -118,7 +153,7 @@ impl Cli {
 Search code with ripgrep and language-aware call graph context.\n\n\
 Usage:\n  tracegrep [flags/rg flags] <pattern> [path ...]\n\n\
 Supported files: .rs, .py, .js, .jsx, .svelte, .ts, .tsx\n\n\
-Tracegrep flags:\n  --json                  Output enriched results as JSON\n  --compact               Collapse human-readable context onto the location line\n  --depth <N>             How many caller levels to show (default: 1)\n  --include-tests         Include test-file callers and references in the graph\n  --include-test-callers  Show callers that originate from test code\n  -h, --help              Print help\n  -V, --version           Print version\n\n\
+Tracegrep flags:\n  --json                  Output enriched results as JSON\n  --compact               Collapse human-readable context onto the location line\n  --build-index           Build or refresh the cached call graph index, then exit\n  --depth <N>             How many caller levels to show (default: 1)\n  --max-context <N>       Max callers/references to show per section (default: 5)\n  --include-tests         Include test-file callers and references in the graph\n  --include-test-callers  Show callers that originate from test code\n  -h, --help              Print help\n  -V, --version           Print version\n\n\
 Any unrecognized flags before <pattern> are forwarded to rg.\n\
 Positional [path ...] arguments use rg semantics.\n",
             env!("CARGO_PKG_VERSION")
