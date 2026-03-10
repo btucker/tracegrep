@@ -23,7 +23,7 @@ Supported file types: `.rs`, `.py`, `.js`, `.jsx`, `.svelte`, `.ts`, and `.tsx`.
 
 ## Why
 
-`tg` decorates matches with the context of how that line of code is called in the codebase. Use this to build understanding of existing call paths & avoid reinvention.
+`tg` decorates matches with the backtrace of how that line of code is called in the codebase. Use this to build understanding of existing call paths & avoid reinvention.
 
 ## Examples
 
