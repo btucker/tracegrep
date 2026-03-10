@@ -10,7 +10,25 @@ This repo also includes a Claude Code skill for tracegrep-aware search flow.
 
 Note: installation differs by environment. The CLI installs with Cargo. Claude Code can also load the packaged skill via the repo's plugin metadata.
 
-### CLI
+### CLI (quick install)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | sh
+```
+
+This downloads the latest release binary for your platform and installs it to `~/.local/bin`. You can customize the install directory:
+
+```bash
+INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | sh
+```
+
+Or install a specific version:
+
+```bash
+VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | sh
+```
+
+### CLI (from source)
 
 Install `rg` first, then install `tracegrep` from this repo:
 
