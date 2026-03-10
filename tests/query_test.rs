@@ -844,7 +844,10 @@ fn second_match() {}
     // shared_context is after-context of first_match AND before-context of second_match.
     // It should appear exactly once in the output (in the first block's after-context),
     // not duplicated across both blocks.
-    let count = stdout.lines().filter(|l| l.contains("shared_context")).count();
+    let count = stdout
+        .lines()
+        .filter(|l| l.contains("shared_context"))
+        .count();
     assert_eq!(
         count, 1,
         "shared_context should appear exactly once, but appeared {count} times.\nstdout:\n{stdout}"
