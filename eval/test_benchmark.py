@@ -247,7 +247,51 @@ class BenchmarkHarnessTests(unittest.TestCase):
             self.assertEqual(len(runs), 1)
             self.assertTrue((runs[0] / "report.md").exists())
             self.assertTrue((runs[0] / "shortlist.json").exists())
+            report = (runs[0] / "report.md").read_text()
+            self.assertIn("uv run eval/benchmark.py add-task example/project 42", report)
             self.assertIn("discovered 1 candidates", stdout.getvalue())
+
+    def test_cmd_add_task_reuses_discovery_shortlist_prompt(self) -> None:
+        discovery_candidate = {
+            **self.example_discovery_candidate(),
+            "ground_truth": {
+                "pr_number": 99,
+                "pr_url": "https://github.com/example/project/pull/99",
+                "merge_commit": "deadbeef",
+                "pre_fix_commit": "abc123",
+                "merged_at": "2026-01-02T00:00:00Z",
+                "pr_author": "contributor",
+            },
+            "prompt": {
+                "title": "Discovery prompt title",
+                "body": "Discovery prompt body",
+            },
+            "evaluation_focus": ["Discovery focus 1", "Discovery focus 2"],
+            "issue_reporter": "reporter",
+        }
+        linked_candidate = self.example_discovery_candidate()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspaces"
+            discovery_run = root / "discovery" / "20260310T120000Z-codex"
+            discovery_run.mkdir(parents=True)
+            benchmark.write_json(discovery_run / "shortlist.json", {"candidates": [discovery_candidate]})
+
+            tasks_path = Path(tmp) / "tasks.json"
+            tasks_path.write_text("[]\n")
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(benchmark, "TASKS_PATH", tasks_path),
+                mock.patch.object(benchmark, "fetch_repo_metadata", return_value=linked_candidate["repo"]),
+                mock.patch.object(benchmark, "find_linked_merged_candidate", return_value=linked_candidate),
+                mock.patch("sys.stdout", stdout),
+            ):
+                exit_code = benchmark.cmd_add_task(root, repo_name="example/project", issue_number=42)
+
+            self.assertEqual(exit_code, 0)
+            tasks = json.loads(tasks_path.read_text())
+            self.assertEqual(tasks[0]["prompt"]["title"], "Discovery prompt title")
+            self.assertEqual(tasks[0]["evaluation_focus"], ["Discovery focus 1", "Discovery focus 2"])
+            self.assertIn("source: discovery shortlist", stdout.getvalue())
 
     def test_report_markdown_without_publish(self) -> None:
         report = benchmark.build_report_markdown(
@@ -849,6 +893,11 @@ class BenchmarkCliSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("discover", result.stdout)
         self.assertIn("--pr-cutoff", result.stdout)
+
+    def test_add_task_help(self) -> None:
+        result = self.run_help("add-task")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("add-task", result.stdout)
 
     def test_main_defaults_to_runs(self) -> None:
         tasks = {"demo-task": {"id": "demo-task"}}

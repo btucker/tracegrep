@@ -43,10 +43,39 @@ The outputs should be read as comparative judgments, not absolute truth. The sco
 
 In normal use, `run-task` is the main entrypoint. It runs the whole benchmark flow for one task: prepare, launch `control`, launch `tg`, judge, publish, and render the report. The lower-level commands are still useful for inspection, retries, and debugging, but they are not the primary workflow.
 
+## Finding And Adding Tasks
+
+The benchmark task set lives in `eval/tasks.json`. There are two supported ways to grow it:
+
+1. Use `discover` to search GitHub for plausible issue/PR pairs and generate a shortlist.
+2. Use `add-task <repo> <issue>` to append one task to `tasks.json`.
+
+The intended workflow is:
+
+1. Run discovery:
+
+   ```bash
+   uv run eval/benchmark.py discover --agent codex
+   ```
+
+2. Review the generated shortlist under `eval/workspaces/discovery/<timestamp>-<agent>/report.md`.
+3. For any candidate you want to keep, run the printed command:
+
+   ```bash
+   uv run eval/benchmark.py add-task facebook/react 35923
+   ```
+
+`discover` is a sourcing tool, not an automatic manifest mutator. It searches recent merged PRs in public MIT-licensed repositories, skips repos already represented in `tasks.json`, and asks `codex` or `claude` to shortlist candidates that look benchmark-worthy. The shortlist includes a drafted benchmark prompt and evaluation-focus bullets.
+
+`add-task` is the promotion step. It looks up a merged PR that closes the issue, builds a `tasks.json` entry, and appends it to the manifest. If the issue already appeared in a discovery shortlist, `add-task` reuses that shortlist's drafted prompt and evaluation focus. Otherwise it falls back to GitHub metadata and a conservative default prompt.
+
+This split is intentional: discovery can be noisy, while `tasks.json` is supposed to stay curated.
+
 ## What it does
 
 - keeps a manifest of historical issue/PR benchmark tasks
 - can discover new candidate issue/PR pairs from GitHub for future benchmark additions
+- can add a new task directly to `tasks.json` from a repo and issue number
 - clones the upstream repo into `eval/workspaces/cache/`
 - creates detached pre-fix git worktrees for `control` and `tg` runs
 - writes redacted task prompts that hide the accepted PR
@@ -71,6 +100,14 @@ uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent claude --a
 `run-task` is the default high-level workflow. It prepares both worktrees, runs both conditions, judges the result, optionally publishes branches, and writes the markdown report.
 
 ### Inspect current state
+
+Add one task directly to the manifest:
+
+```bash
+uv run eval/benchmark.py add-task facebook/react 35923
+```
+
+`add-task` looks for a merged PR that closes the issue. If the issue already appeared in a discovery shortlist, it reuses that shortlist's drafted prompt and evaluation focus; otherwise it falls back to GitHub metadata and a conservative default prompt.
 
 Discover recent candidate tasks with an agent-assisted shortlist:
 
@@ -163,6 +200,10 @@ Discovery creates:
 - `eval/workspaces/discovery/<timestamp>-<agent>/shortlist.json`
 - `eval/workspaces/discovery/<timestamp>-<agent>/report.md`
 
+Adding a task updates:
+
+- `eval/tasks.json`
+
 Preparing a task creates:
 
 - `eval/workspaces/cache/<repo>/` shared upstream clone
@@ -214,23 +255,7 @@ For the `tg` worktree only, `prepare` also creates:
 
 ## Notes
 
-- The prompts tell agents not to browse the web or inspect PR history.
-- The prompts also forbid `git fetch`, `git pull`, `git checkout`, and similar commands that would consult remotes or change the benchmark baseline.
-- The `control` prompt explicitly forbids `tg`.
-- The `tg` prompt explicitly prefers `tg`/`tracegrep` for supported source files.
-- The benchmark is about agent use of `tg`, so the `tg` condition includes the agent-specific skill/plugin wiring needed to expose it naturally.
-- The generated launchers prepend `.eval-bin/` to `PATH` and set `TRACEGREP_CACHE_DIR` to `.tracegrep-cache/` so `tg` stays usable inside the workspace sandbox.
-- The generated `tg` launchers also prewarm the repo index inside the worktree, so the first agent search is less dominated by cold graph construction.
-- The `control` worktree does not get the Codex skill or Claude plugin config.
-- For tasks where the original issue contained solution leakage, the manifest uses a redacted benchmark prompt instead.
-- The judge stays blind to which side is `control` vs `tg`; that mapping is only revealed in the final markdown report.
-- The judge compares three parent-based diffs: parent -> A, parent -> B, and parent -> accepted PR.
-- The judge gets tool access, but only through blinded `judge_workspace/` artifacts and sanitized repo exports, not the live `control/` or `tg` worktrees.
 - The default judge agent comes from `TRACEGREP_EVAL_JUDGE_AGENT` and falls back to `claude`.
 - `publish` uses `gh` to detect or create forks under `btucker`, then pushes both branches with opaque benchmark branch names.
 - Public publishing can leak benchmark solutions into future search. Treat published branches as post-hoc artifacts, not inputs to new runs.
 - The markdown reports are meant to be committed back into this repo; the disposable run artifacts stay under `eval/workspaces/`.
-- `run-task` is the one-command sequential workflow: prepare, launch control, launch tg, judge, publish, and render the report.
-- `discover` uses GitHub search plus a structured `codex` or `claude` pass to shortlist issue/PR pairs for future benchmark additions.
-- `discover` filters to MIT-licensed public repos, skips repos already present in `tasks.json`, and currently limits the pool to tracegrep-supported primary languages (`JavaScript`, `TypeScript`, `Python`, `Rust`).
-- The default discovery recency gate is PRs merged on or after about six months before the run date. Override `--pr-cutoff YYYY-MM-DD` if you want a stricter or looser approximation of training-data freshness.

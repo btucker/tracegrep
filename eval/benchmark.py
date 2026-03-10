@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -250,9 +251,16 @@ query($searchQuery: String!, $limit: Int!) {
 """.strip()
 
 
+def load_task_list() -> list[dict[str, Any]]:
+    return json.loads(TASKS_PATH.read_text())
+
+
 def load_tasks() -> dict[str, dict[str, Any]]:
-    tasks = json.loads(TASKS_PATH.read_text())
-    return {task["id"]: task for task in tasks}
+    return {task["id"]: task for task in load_task_list()}
+
+
+def save_task_list(tasks: list[dict[str, Any]]) -> None:
+    TASKS_PATH.write_text(json.dumps(tasks, indent=2) + "\n")
 
 
 def repo_slug(task: dict[str, Any]) -> str:
@@ -991,6 +999,41 @@ def cmd_discover(
             f"- [{candidate['kind']}] {candidate['repo']['name']} issue #{candidate['issue']['number']} "
             f"-> PR #{candidate['ground_truth']['pr_number']}"
         )
+        print(f"  add: uv run eval/benchmark.py add-task {candidate['repo']['name']} {candidate['issue']['number']}")
+    return 0
+
+
+def cmd_add_task(root: Path, *, repo_name: str, issue_number: int) -> int:
+    repo_name = normalize_repo_name(repo_name)
+    task_list = load_task_list()
+    for task in task_list:
+        if task["repo"]["name"] == repo_name and task["issue"]["number"] == issue_number:
+            raise SystemExit(f"Task already exists for {repo_name} issue #{issue_number}: {task['id']}")
+
+    repo = fetch_repo_metadata(repo_name)
+    linked_candidate = find_linked_merged_candidate(repo, issue_number)
+    if linked_candidate is None:
+        raise SystemExit(
+            f"Could not find a merged PR in {repo_name} that closes issue #{issue_number}. "
+            "Try adding it through `discover` first or verify the issue/PR linkage on GitHub."
+        )
+
+    discovery_candidate = find_discovery_candidate(root, repo_name, issue_number)
+    entry = build_task_entry_from_candidate(
+        repo_name=repo_name,
+        issue_number=issue_number,
+        existing_ids={task["id"] for task in task_list},
+        discovery_candidate=discovery_candidate,
+        linked_candidate=linked_candidate,
+    )
+    task_list.append(entry)
+    save_task_list(task_list)
+
+    source = "discovery shortlist" if discovery_candidate else "GitHub metadata defaults"
+    print(f"added task {entry['id']} to {TASKS_PATH}")
+    print(f"source: {source}")
+    print(f"issue: {entry['issue']['url']}")
+    print(f"pr: {entry['ground_truth']['pr_url']}")
     return 0
 
 
@@ -1419,6 +1462,7 @@ def build_discovery_markdown(shortlist: dict[str, Any]) -> str:
                 f"- Issue: [{candidate['issue']['title']}]({candidate['issue']['url']}) by `{candidate['issue_reporter']}`",
                 f"- PR: [#{candidate['ground_truth']['pr_number']}]({candidate['ground_truth']['pr_url']}) by `{candidate['ground_truth']['pr_author']}` merged `{candidate['ground_truth']['merged_at']}`",
                 f"- Rationale: {candidate['rationale']}",
+                f"- Add with: `uv run eval/benchmark.py add-task {candidate['repo']['name']} {candidate['issue']['number']}`",
                 "",
                 "### Prompt Draft",
                 f"- Title: {candidate['prompt']['title']}",
@@ -1429,6 +1473,183 @@ def build_discovery_markdown(shortlist: dict[str, Any]) -> str:
             ]
         )
     return "\n".join(lines) + "\n"
+
+
+def normalize_repo_name(value: str) -> str:
+    parts = value.strip().split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise SystemExit(f"Expected repo in owner/name form, got {value!r}.")
+    return f"{parts[0]}/{parts[1]}"
+
+
+def slugify(value: str, *, max_length: int = 48) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    if len(slug) <= max_length:
+        return slug
+    trimmed = slug[:max_length].rstrip("-")
+    return trimmed or "task"
+
+
+def derive_task_id(repo_name: str, title: str, issue_number: int, existing_ids: set[str]) -> str:
+    repo_prefix = slugify(repo_name.split("/", 1)[1], max_length=24)
+    title_slug = slugify(title, max_length=56) or f"issue-{issue_number}"
+    candidate = f"{repo_prefix}-{title_slug}"
+    if candidate not in existing_ids:
+        return candidate
+    numbered = f"{candidate}-{issue_number}"
+    if numbered not in existing_ids:
+        return numbered
+    suffix = 2
+    while f"{numbered}-{suffix}" in existing_ids:
+        suffix += 1
+    return f"{numbered}-{suffix}"
+
+
+def find_discovery_candidate(root: Path, repo_name: str, issue_number: int) -> dict[str, Any] | None:
+    discovery_root = root / "discovery"
+    if not discovery_root.exists():
+        return None
+    for run_path in sorted((path for path in discovery_root.iterdir() if path.is_dir()), reverse=True):
+        shortlist_path = run_path / "shortlist.json"
+        if not shortlist_path.exists():
+            continue
+        shortlist = load_json(shortlist_path)
+        for candidate in shortlist.get("candidates", []):
+            if candidate["repo"]["name"] == repo_name and candidate["issue"]["number"] == issue_number:
+                return candidate
+    return None
+
+
+def fetch_repo_metadata(repo_name: str) -> dict[str, Any]:
+    payload = gh_api_json([f"repos/{repo_name}"])
+    license_info = payload.get("license") or {}
+    return {
+        "name": payload["full_name"],
+        "url": payload["html_url"],
+        "git_url": payload["clone_url"],
+        "description": payload.get("description") or "",
+        "language": payload.get("language") or "Unknown",
+        "license": license_info.get("spdx_id") or "Unknown",
+        "stars": payload.get("stargazers_count", 0),
+        "size_kb": payload.get("size", 0),
+    }
+
+
+def find_linked_merged_candidate(repo: dict[str, Any], issue_number: int, *, limit: int = 100) -> dict[str, Any] | None:
+    query = f"repo:{repo['name']} is:pr is:merged sort:updated-desc"
+    payload = gh_graphql_json(DISCOVERY_PULL_REQUEST_QUERY, {"searchQuery": query, "limit": limit})
+    nodes = payload.get("data", {}).get("search", {}).get("nodes", [])
+    for node in nodes:
+        if node.get("__typename") != "PullRequest":
+            continue
+        pr_author = ((node.get("author") or {}).get("login") or "").strip()
+        merge_commit = node.get("mergeCommit") or {}
+        parents = (merge_commit.get("parents") or {}).get("nodes") or []
+        if not pr_author or not merge_commit.get("oid") or not parents:
+            continue
+        closing_issues = (node.get("closingIssuesReferences") or {}).get("nodes") or []
+        for issue in closing_issues:
+            if issue["number"] != issue_number:
+                continue
+            issue_author = ((issue.get("author") or {}).get("login") or "").strip()
+            labels = [label["name"] for label in (issue.get("labels") or {}).get("nodes", [])]
+            body = issue.get("bodyText") or ""
+            return {
+                "repo": repo,
+                "issue": {
+                    "number": issue["number"],
+                    "url": issue["url"],
+                    "title": issue["title"],
+                    "author": issue_author,
+                    "created_at": issue["createdAt"],
+                    "closed_at": issue.get("closedAt"),
+                    "labels": labels,
+                    "body_excerpt": truncate_text(body),
+                },
+                "pr": {
+                    "number": node["number"],
+                    "url": node["url"],
+                    "title": node["title"],
+                    "author": pr_author,
+                    "merged_at": node["mergedAt"],
+                    "merge_commit": merge_commit["oid"],
+                    "pre_fix_commit": parents[0]["oid"],
+                    "changed_files": node.get("changedFiles"),
+                    "additions": node.get("additions"),
+                    "deletions": node.get("deletions"),
+                },
+                "kind_hint": candidate_kind_hint(issue["title"], labels, body),
+            }
+    return None
+
+
+def default_prompt_title(issue_title: str) -> str:
+    return re.sub(r"\s+", " ", issue_title.replace("`", "")).strip()
+
+
+def default_prompt_body(issue: dict[str, Any]) -> str:
+    return (
+        f"Implement the change requested in issue #{issue['number']}: {issue['title']}. "
+        "Use the repository's existing architecture and update any relevant tests, docs, types, or configuration "
+        "in the repo's normal style. Work only from the checked-out repository state and this prompt."
+    )
+
+
+def default_evaluation_focus(kind_hint: str) -> list[str]:
+    if kind_hint == "bug":
+        return [
+            "Did the implementation fix the reported behavior using the repo's existing architecture rather than layering on a workaround?",
+            "Did it update tests and any affected docs/types/config consistently with the change?",
+            "Did it keep the change scoped to the affected subsystem without duplicating nearby logic?",
+        ]
+    return [
+        "Did the implementation extend the existing architecture instead of introducing a parallel path?",
+        "Did it update tests and any affected docs/types/config consistently with the feature change?",
+        "Did it keep the new behavior aligned with surrounding patterns without unnecessary duplication?",
+    ]
+
+
+def build_task_entry_from_candidate(
+    *,
+    repo_name: str,
+    issue_number: int,
+    existing_ids: set[str],
+    discovery_candidate: dict[str, Any] | None,
+    linked_candidate: dict[str, Any],
+) -> dict[str, Any]:
+    prompt_title = discovery_candidate["prompt"]["title"] if discovery_candidate else default_prompt_title(linked_candidate["issue"]["title"])
+    prompt_body = discovery_candidate["prompt"]["body"] if discovery_candidate else default_prompt_body(linked_candidate["issue"])
+    evaluation_focus = (
+        discovery_candidate["evaluation_focus"]
+        if discovery_candidate
+        else default_evaluation_focus(linked_candidate["kind_hint"])
+    )
+    return {
+        "id": derive_task_id(repo_name, prompt_title, issue_number, existing_ids),
+        "repo": {
+            "name": linked_candidate["repo"]["name"],
+            "url": linked_candidate["repo"]["git_url"],
+            "license": linked_candidate["repo"]["license"],
+            "language": linked_candidate["repo"]["language"],
+        },
+        "issue": {
+            "number": linked_candidate["issue"]["number"],
+            "url": linked_candidate["issue"]["url"],
+            "title": linked_candidate["issue"]["title"],
+        },
+        "ground_truth": {
+            "pr_number": linked_candidate["pr"]["number"],
+            "pr_url": linked_candidate["pr"]["url"],
+            "merge_commit": linked_candidate["pr"]["merge_commit"],
+            "pre_fix_commit": linked_candidate["pr"]["pre_fix_commit"],
+        },
+        "prompt": {
+            "title": prompt_title,
+            "body": prompt_body,
+        },
+        "evaluation_focus": evaluation_focus,
+    }
 
 
 def run_discovery_claude(prompt: str, *, cwd: Path, model: str | None) -> dict[str, Any]:
@@ -2686,6 +2907,14 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     show_parser = subparsers.add_parser("show", help="Show details for one task.")
     show_parser.add_argument("task_id", choices=task_ids)
 
+    add_task_parser = subparsers.add_parser(
+        "add-task",
+        help="Add one benchmark task to tasks.json from a repo and issue number.",
+    )
+    add_task_parser.add_argument("repo_name")
+    add_task_parser.add_argument("issue_number", type=int)
+    add_task_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+
     discover_parser = subparsers.add_parser(
         "discover",
         help="Search recent GitHub issue/PR pairs and have codex or claude shortlist benchmark candidates.",
@@ -2796,6 +3025,8 @@ def main() -> int:
         return cmd_list(tasks, args.root)
     if args.command == "show":
         return cmd_show(tasks, args.task_id)
+    if args.command == "add-task":
+        return cmd_add_task(args.root, repo_name=args.repo_name, issue_number=args.issue_number)
     if args.command == "discover":
         return cmd_discover(
             tasks,
