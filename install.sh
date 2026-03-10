@@ -4,9 +4,12 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | sh
 #
-# Environment variables:
+# Environment variables (set on the sh side of the pipe, not the curl side):
 #   VERSION      — specific version to install (e.g., "v0.1.0"); defaults to latest
 #   INSTALL_DIR  — installation directory; defaults to ~/.local/bin
+#
+# Example:
+#   curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | INSTALL_DIR=/usr/local/bin sh
 
 set -eu
 

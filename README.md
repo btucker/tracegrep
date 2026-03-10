@@ -19,13 +19,13 @@ curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh |
 This downloads the latest release binary for your platform and installs it to `~/.local/bin`. You can customize the install directory:
 
 ```bash
-INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | INSTALL_DIR=/usr/local/bin sh
 ```
 
 Or install a specific version:
 
 ```bash
-VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | VERSION=v0.1.0 sh
 ```
 
 ### CLI (from source)
