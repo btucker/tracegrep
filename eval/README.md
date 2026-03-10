@@ -33,6 +33,13 @@ Inspect one task:
 uv run eval/benchmark.py show storybook-hide-toolbar-docs
 ```
 
+Discover recent candidate tasks with an agent-assisted shortlist:
+
+```bash
+uv run eval/benchmark.py discover --agent codex
+uv run eval/benchmark.py discover --agent claude --model sonnet --pr-cutoff 2025-09-10
+```
+
 Prepare one task:
 
 ```bash
@@ -101,6 +108,14 @@ Preparing a task creates:
 - `eval/workspaces/runs/<task>/launch_<agent>_<condition>.sh` launcher script
 - `eval/workspaces/runs/<task>/hidden/ground_truth.json` accepted PR metadata for evaluation
 
+Discovery creates:
+
+- `eval/workspaces/discovery/<timestamp>-<agent>/raw_candidates.json`
+- `eval/workspaces/discovery/<timestamp>-<agent>/selection_prompt.md`
+- `eval/workspaces/discovery/<timestamp>-<agent>/selection.json`
+- `eval/workspaces/discovery/<timestamp>-<agent>/shortlist.json`
+- `eval/workspaces/discovery/<timestamp>-<agent>/report.md`
+
 Judging a task creates:
 
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/control.diff`
@@ -145,3 +160,6 @@ For the `tg` worktree only, `prepare` also creates:
 - Public publishing can leak benchmark solutions into future search. Treat published branches as post-hoc artifacts, not inputs to new runs.
 - The markdown reports are meant to be committed back into this repo; the disposable run artifacts stay under `eval/workspaces/`.
 - `run-task` is the one-command sequential workflow: prepare, launch control, launch tg, judge, publish, and render the report.
+- `discover` uses GitHub search plus a structured `codex` or `claude` pass to shortlist issue/PR pairs for future benchmark additions.
+- `discover` filters to MIT-licensed public repos, skips repos already present in `tasks.json`, and currently limits the pool to tracegrep-supported primary languages (`JavaScript`, `TypeScript`, `Python`, `Rust`).
+- The default discovery recency gate is PR merged on or after six months before the run date. Override `--pr-cutoff YYYY-MM-DD` if you want a stricter or looser approximation of training-data freshness.
