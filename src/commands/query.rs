@@ -152,8 +152,8 @@ impl Colors {
         out
     }
 
-    fn format_location(&self, file: &str, function: &str) -> String {
-        format!("{}:{}", self.path(file), function)
+    fn format_location(&self, file: &str, function: &str, line: usize) -> String {
+        format!("{}:{}:{}", self.path(file), function, self.line(line))
     }
 
     fn format_caller(&self, caller: &CallerInfo) -> String {
@@ -735,6 +735,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                 let (_, hidden_test_references) =
                     truncate_context(references.test.clone(), options.max_context);
                 out["function"] = serde_json::json!(node.name);
+                out["function_line"] = serde_json::json!(node.line);
                 out["qualified_name"] = serde_json::json!(node.qualified_name);
                 out["language"] = serde_json::to_value(node.language)?;
                 out["is_test"] = serde_json::json!(node.is_test);
@@ -814,7 +815,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                 references: hidden_references,
                 test_references: hidden_test_references,
             };
-            let mut location = colors.format_location(file, &node.name);
+            let mut location = colors.format_location(file, &node.name, node.line);
             if options.compact {
                 let compact_sections = render_compact_sections(
                     &colors,
