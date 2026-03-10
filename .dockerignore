@@ -1,0 +1,6 @@
+.git
+target
+eval/workspaces
+eval/reports
+**/__pycache__
+.DS_Store

@@ -1,0 +1,9 @@
+{
+  "name": "tracegrep-eval",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "remoteUser": "node",
+  "workspaceFolder": "/workspace"
+}
