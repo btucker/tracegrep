@@ -1396,7 +1396,13 @@ def run_discovery_claude(prompt: str, *, cwd: Path, model: str | None) -> dict[s
     if model:
         command.extend(["--model", model])
     command.append(prompt)
-    completed = run(command, cwd=cwd, capture_output=True)
+    try:
+        completed = run(command, cwd=cwd, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        stderr_msg = (exc.stderr or "").strip()
+        raise RuntimeError(
+            f"claude exec failed (exit {exc.returncode}): {stderr_msg}"
+        ) from exc
     payload = parse_json_output(completed.stdout)
     if not isinstance(payload, dict):
         raise ValueError("Discovery output was not a JSON object.")
@@ -1428,7 +1434,13 @@ def run_discovery_codex(prompt: str, *, cwd: Path, model: str | None) -> dict[st
         if model:
             command.extend(["--model", model])
         command.append(prompt)
-        completed = run(command, cwd=cwd, capture_output=True)
+        try:
+            completed = run(command, cwd=cwd, capture_output=True)
+        except subprocess.CalledProcessError as exc:
+            stderr_msg = (exc.stderr or "").strip()
+            raise RuntimeError(
+                f"codex exec failed (exit {exc.returncode}): {stderr_msg}"
+            ) from exc
         if output_path.exists():
             raw = output_path.read_text()
         else:
@@ -1834,11 +1846,17 @@ def run_judge_claude(prompt: str, *, cwd: Path, judge_model: str | None) -> dict
     if judge_model:
         command.extend(["--model", judge_model])
     command.append(prompt)
-    completed = run(
-        command,
-        cwd=cwd,
-        capture_output=True,
-    )
+    try:
+        completed = run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr_msg = (exc.stderr or "").strip()
+        raise RuntimeError(
+            f"claude exec failed (exit {exc.returncode}): {stderr_msg}"
+        ) from exc
     payload = parse_judge_output(completed.stdout)
     validate_judgment(payload)
     return payload
@@ -1869,11 +1887,17 @@ def run_judge_codex(prompt: str, *, cwd: Path, judge_model: str | None) -> dict[
         if judge_model:
             command.extend(["--model", judge_model])
         command.append(prompt)
-        completed = run(
-            command,
-            cwd=cwd,
-            capture_output=True,
-        )
+        try:
+            completed = run(
+                command,
+                cwd=cwd,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr_msg = (exc.stderr or "").strip()
+            raise RuntimeError(
+                f"codex exec failed (exit {exc.returncode}): {stderr_msg}"
+            ) from exc
         if output_path.exists():
             raw = output_path.read_text()
         else:
