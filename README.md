@@ -1,6 +1,6 @@
 # tracegrep
 
-`tracegrep` layers call-trace context on top of `rg` ([ripgrep](https://github.com/BurntSushi/ripgrep)) results. 
+`tracegrep` layers backtrace context on top of `rg` ([ripgrep](https://github.com/BurntSushi/ripgrep)) results. 
 It exists to give coding agent instant context for how a line of code is used in the codebase. This allows the coding agent to gain a more complete understanding prior to making changes.
 Rust, Python, Typscript & Javascript are currently supported via [treesitter](https://github.com/tree-sitter/tree-sitter).
 
