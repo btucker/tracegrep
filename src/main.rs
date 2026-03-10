@@ -1,10 +1,28 @@
 use tracegrep::cli::Cli;
 use tracegrep::commands;
+use tracegrep::completions;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse()?;
 
-    if cli.build_index {
+    if let Some(target) = cli.generate.as_deref() {
+        print!("{}", completions::generate(target)?);
+        Ok(())
+    } else if cli.install_completions.is_some() {
+        let shell_arg = cli
+            .install_completions
+            .as_deref()
+            .filter(|value| *value != "auto");
+        let result = completions::install(shell_arg)?;
+        println!("Installed {:?} completions.", result.shell);
+        for path in result.written_files {
+            println!("  wrote {}", path.display());
+        }
+        for path in result.updated_rc_files {
+            println!("  updated {}", path.display());
+        }
+        Ok(())
+    } else if cli.build_index {
         commands::build_index::run(commands::build_index::BuildIndexOptions {
             repo: &cli.repo,
             include_tests: cli.include_tests,

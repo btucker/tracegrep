@@ -71,6 +71,19 @@ fn run_tracegrep(repo: &std::path::Path, args: &[&str]) -> std::process::Output 
         .unwrap()
 }
 
+fn run_tracegrep_with_env(
+    repo: &std::path::Path,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tracegrep"));
+    command.args(args).current_dir(repo);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().unwrap()
+}
+
 fn run_tracegrep_with_cache(
     repo: &std::path::Path,
     cache_dir: &std::path::Path,
@@ -335,9 +348,18 @@ fn end() {}
     assert!(stdout.contains("start();"), "stdout:\n{stdout}");
     assert!(stdout.contains("end();"), "stdout:\n{stdout}");
     assert!(stdout.contains("middle();"), "stdout:\n{stdout}");
-    assert!(stdout.contains("\n4-") || stdout.contains("\n 4-"), "stdout:\n{stdout}");
-    assert!(stdout.contains("\n5:") || stdout.contains("\n 5:"), "stdout:\n{stdout}");
-    assert!(stdout.contains("\n6-") || stdout.contains("\n 6-"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("\n4-") || stdout.contains("\n 4-"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\n5:") || stdout.contains("\n 5:"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\n6-") || stdout.contains("\n 6-"),
+        "stdout:\n{stdout}"
+    );
     let end_idx = stdout.find("end();").unwrap();
     let called_via_idx = stdout.find("Called via:").unwrap();
     assert!(end_idx < called_via_idx, "stdout:\n{stdout}");
@@ -977,4 +999,68 @@ fn test_build_index_timings_env_var_prints_stage_summary() {
     );
     assert!(stderr.contains("derived_index_build="), "stderr:\n{stderr}");
     assert!(stderr.contains("total="), "stderr:\n{stderr}");
+}
+
+#[test]
+fn test_generate_zsh_completion_mentions_path_completion() {
+    let dir = create_query_test_repo();
+    let output = run_tracegrep(dir.path(), &["--generate", "complete-zsh"]);
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(
+        stdout.contains("#compdef tg tracegrep"),
+        "stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("_files"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("--install-completions"),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_install_zsh_completions_writes_files_and_updates_rc() {
+    let dir = create_query_test_repo();
+    let home = tempfile::tempdir().unwrap();
+    let data_home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_string_lossy().into_owned();
+    let data_home_str = data_home.path().to_string_lossy().into_owned();
+
+    let output = run_tracegrep_with_env(
+        dir.path(),
+        &[("HOME", &home_str), ("XDG_DATA_HOME", &data_home_str)],
+        &["--install-completions", "zsh"],
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+
+    let completion_path = data_home
+        .path()
+        .join("zsh")
+        .join("site-functions")
+        .join("_tg");
+    let rc_path = home.path().join(".zshrc");
+    assert!(
+        completion_path.exists(),
+        "missing {}",
+        completion_path.display()
+    );
+    let completion = std::fs::read_to_string(&completion_path).unwrap();
+    assert!(completion.contains("_files"), "completion:\n{completion}");
+    let rc = std::fs::read_to_string(&rc_path).unwrap();
+    assert!(rc.contains("tracegrep completions"), "rc:\n{rc}");
+    let completions_dir = data_home.path().join("zsh").join("site-functions");
+    assert!(
+        rc.contains(completions_dir.to_string_lossy().as_ref()),
+        "rc:\n{rc}"
+    );
 }

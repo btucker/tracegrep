@@ -20,6 +20,16 @@ cargo install --path .
 
 This installs both `tracegrep` and `tg`.
 
+Then install shell completions:
+
+```bash
+tg --install-completions
+```
+
+`tg` auto-detects `bash`, `zsh`, or `fish` from `$SHELL`. For `bash` and `zsh`,
+it also updates your shell rc file so completions load in new shells. Restart the
+shell after installation, or source the updated rc file once.
+
 ### Claude Code (via Plugin Marketplace)
 
 In Claude Code, register the repository marketplace first:
@@ -51,6 +61,7 @@ Verify the CLI:
 ```bash
 tracegrep --version
 tg --help
+tg --generate complete-zsh | head
 ```
 
 In Claude Code, start a fresh session and ask it to search the repo. It should prefer `tg`/`tracegrep`-aware search flow rather than raw `rg`.
@@ -60,6 +71,9 @@ In Claude Code, start a fresh session and ask it to search the repo. It should p
 After `cargo install --path .`, both `tracegrep` and `tg` are installed.
 
 ```bash
+# Install completions once for the current shell
+tg --install-completions
+
 # Search with caller/reference context
 tg tool_data /path/to/repo
 
@@ -71,6 +85,9 @@ tg --include-tests --include-test-callers tool_data /path/to/repo
 
 # Search a subset of the repo with rg-style path arguments
 tg tool_data src tests
+
+# Emit a completion script without installing it
+tg --generate complete-zsh
 ```
 
 ## Example output
