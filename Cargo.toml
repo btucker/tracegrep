@@ -1,8 +1,10 @@
 [package]
 name = "tracegrep"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "Search code with ripgrep and Rust call graph context"
+license = "MIT"
+repository = "https://github.com/btucker/tracegrep"
 
 [dependencies]
 anyhow = "1"
