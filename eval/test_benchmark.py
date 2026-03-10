@@ -212,6 +212,66 @@ class BenchmarkHarnessTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             benchmark.forwarded_build_args(["--model", "gpt-5"], "sonnet")
 
+    def test_render_task_table_falls_back_without_rich(self) -> None:
+        tasks = {"demo-task": self.task}
+        rendered = benchmark.render_plain_task_list(tasks)
+
+        self.assertEqual(
+            rendered,
+            "demo-task: example/project | Add example feature | issue #42\n",
+        )
+
+    def test_cmd_list_prints_rich_table_when_available(self) -> None:
+        tasks = {"demo-task": self.task}
+
+        class FakeTable:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+                self.columns: list[tuple[str, dict[str, object]]] = []
+                self.rows: list[tuple[str, ...]] = []
+
+            def add_column(self, name: str, **kwargs: object) -> None:
+                self.columns.append((name, kwargs))
+
+            def add_row(self, *values: str) -> None:
+                self.rows.append(values)
+
+        class FakeConsole:
+            instances: list["FakeConsole"] = []
+
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+                self.print_calls: list[FakeTable] = []
+                FakeConsole.instances.append(self)
+
+            def print(self, table: FakeTable) -> None:
+                self.print_calls.append(table)
+
+        fake_box = mock.Mock(SIMPLE_HEAVY="simple-heavy")
+        with (
+            mock.patch.object(benchmark, "Console", FakeConsole),
+            mock.patch.object(benchmark, "Table", FakeTable),
+            mock.patch.object(benchmark, "box", fake_box),
+        ):
+            exit_code = benchmark.cmd_list(tasks)
+
+        self.assertEqual(exit_code, 0)
+        console = FakeConsole.instances[0]
+        self.assertEqual(console.kwargs["width"], 120)
+        table = console.print_calls[0]
+        self.assertEqual([name for name, _ in table.columns], ["Repo", "Issue", "Task", "Title"])
+        self.assertEqual(
+            table.rows,
+            [
+                (
+                    "example/project",
+                    "[link=https://github.com/example/project/issues/42]#42[/link]",
+                    "demo-task",
+                    "Add example feature",
+                )
+            ],
+        )
+
     def test_run_judge_claude_streams_prompt_over_stdin(self) -> None:
         prompt = "x" * 20000
         expected = self.example_judgment()

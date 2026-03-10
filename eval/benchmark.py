@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
+# dependencies = ["rich>=13.9,<15"]
 # ///
 
 from __future__ import annotations
@@ -20,6 +21,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.table import Table
+except ImportError:
+    box = None
+    Console = None
+    Table = None
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 TASKS_PATH = SCRIPT_DIR / "tasks.json"
@@ -506,12 +515,47 @@ def prepare_task(root: Path, task: dict[str, Any], *, force: bool) -> None:
 
 
 def cmd_list(tasks: dict[str, dict[str, Any]]) -> int:
-    for task in tasks.values():
-        print(
-            f"{task['id']}: {task['repo']['name']} | "
-            f"{task['prompt']['title']} | issue #{task['issue']['number']}"
-        )
+    if Console is None or Table is None or box is None:
+        print(render_plain_task_list(tasks), end="")
+        return 0
+
+    console_kwargs: dict[str, Any] = {}
+    if not sys.stdout.isatty():
+        console_kwargs["width"] = 120
+    Console(**console_kwargs).print(build_task_table(tasks))
     return 0
+
+
+def render_plain_task_list(tasks: dict[str, dict[str, Any]]) -> str:
+    return "".join(
+        f"{task['id']}: {task['repo']['name']} | "
+        f"{task['prompt']['title']} | issue #{task['issue']['number']}\n"
+        for task in tasks.values()
+    )
+
+
+def build_task_table(tasks: dict[str, dict[str, Any]]) -> Table:
+    if Table is None or box is None:
+        raise RuntimeError("rich is not available")
+
+    table = Table(
+        box=box.SIMPLE_HEAVY,
+        header_style="bold",
+    )
+    table.add_column("Repo", no_wrap=True, style="green")
+    table.add_column("Issue", justify="right", no_wrap=True, style="magenta")
+    table.add_column("Task", no_wrap=True, style="cyan")
+    table.add_column("Title", overflow="fold")
+
+    for task in tasks.values():
+        table.add_row(
+            task["repo"]["name"],
+            f"[link={task['issue']['url']}]#{task['issue']['number']}[/link]",
+            task["id"],
+            task["prompt"]["title"],
+        )
+
+    return table
 
 
 def cmd_show(tasks: dict[str, dict[str, Any]], task_id: str) -> int:
