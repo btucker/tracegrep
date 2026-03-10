@@ -627,6 +627,38 @@ class BenchmarkHarnessTests(unittest.TestCase):
 
         self.assertEqual(diff_paths, ["tracked.txt"])
 
+    def test_write_worktree_excludes_preserves_existing_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            # Pre-populate .git/info/exclude with a custom entry
+            info_dir = repo / ".git" / "info"
+            info_dir.mkdir(parents=True, exist_ok=True)
+            exclude_file = info_dir / "exclude"
+            exclude_file.write_text("# custom exclusion\nmy-custom-dir/\n")
+
+            benchmark.write_worktree_excludes(repo)
+
+            content = exclude_file.read_text()
+            # Custom entry must survive
+            self.assertIn("my-custom-dir/", content)
+            # New exclusions must be present
+            for d in benchmark.WORKTREE_SNAPSHOT_EXCLUDES:
+                self.assertIn(f"{d}/", content)
+
+    def test_write_worktree_excludes_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+
+            benchmark.write_worktree_excludes(repo)
+            benchmark.write_worktree_excludes(repo)
+
+            content = (repo / ".git" / "info" / "exclude").read_text()
+            for d in benchmark.WORKTREE_SNAPSHOT_EXCLUDES:
+                # Each entry should appear exactly once
+                self.assertEqual(content.count(f"{d}/"), 1)
+
     def test_render_task_table_falls_back_without_rich(self) -> None:
         tasks = {"demo-task": self.task}
         with tempfile.TemporaryDirectory() as tmp:
