@@ -915,7 +915,7 @@ def build_judge_input(
     for label in ("A", "B"):
         condition = label_to_condition[label]
         implementations[label] = {
-            "diff_path": f"{condition}.diff",
+            "diff_path": f"{label}.diff",
             "diff": (eval_dir / f"{condition}.diff").read_text(),
             "files": load_json(eval_dir / f"{condition}_files.json"),
         }

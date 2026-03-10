@@ -311,6 +311,39 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(run_mock.call_args.kwargs["input_text"], prompt)
 
 
+    def test_judge_input_does_not_leak_condition_names(self) -> None:
+        """The judge must stay blind to which implementation is control vs tg.
+
+        Verify that neither 'control' nor 'tg' appears anywhere in the
+        serialized judge input dict (excluding the blind manifest itself,
+        which is not passed to the judge).
+        """
+        blind_manifest = self.example_blind_manifest()
+        with tempfile.TemporaryDirectory() as tmp:
+            eval_dir = Path(tmp)
+            # Create the diff and file artifacts that build_judge_input reads
+            for condition in ("control", "tg"):
+                (eval_dir / f"{condition}.diff").write_text(f"diff for {condition}")
+                benchmark.write_json(eval_dir / f"{condition}_files.json", {"files": []})
+            (eval_dir / "ground_truth.diff").write_text("diff for ground_truth")
+            benchmark.write_json(eval_dir / "ground_truth_files.json", {"files": []})
+
+            judge_input = benchmark.build_judge_input(
+                task=self.task,
+                blind_manifest=blind_manifest,
+                eval_dir=eval_dir,
+            )
+
+        # Serialize the judge input and check for leaks
+        serialized = json.dumps(judge_input)
+        # The diff *content* may contain the word "control" or "tg" since
+        # we wrote it above, but the structural keys like diff_path must not.
+        # Check only the keys and diff_path values.
+        for label_data in judge_input["implementations"].values():
+            self.assertNotIn("control", label_data["diff_path"])
+            self.assertNotIn("tg", label_data["diff_path"])
+
+
 class BenchmarkCliSmokeTests(unittest.TestCase):
     def run_help(self, subcommand: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
