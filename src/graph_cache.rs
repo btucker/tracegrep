@@ -619,7 +619,6 @@ fn full_rebuild_language(
     let changed_files = files.keys().cloned().collect::<Vec<_>>();
 
     write_graph(repo_path, include_tests, language, &graph)?;
-    drop(_progress);
     let state_meta = write_state(
         repo_path,
         include_tests,
@@ -633,6 +632,7 @@ fn full_rebuild_language(
             files,
         },
     )?;
+    drop(_progress);
 
     Ok(LanguageLoadResult {
         graph,
@@ -653,15 +653,6 @@ fn incremental_rebuild_language(
     changed_files: &[String],
     timings: &mut TimingCollector,
 ) -> anyhow::Result<LanguageLoadResult> {
-    let _progress = DelayedMessage::new(
-        format!(
-            "Incrementally rebuilding {} graph ({} changed file{})",
-            language.display_name(),
-            changed_files.len(),
-            if changed_files.len() == 1 { "" } else { "s" }
-        ),
-        std::time::Duration::from_secs(1),
-    );
     let mut state = match read_state(repo_path, include_tests, language, timings) {
         Ok(state) => state,
         Err(_) => {
@@ -689,6 +680,16 @@ fn incremental_rebuild_language(
             timings,
         );
     }
+
+    let _progress = DelayedMessage::new(
+        format!(
+            "Incrementally rebuilding {} graph ({} changed file{})",
+            language.display_name(),
+            changed_files.len(),
+            if changed_files.len() == 1 { "" } else { "s" }
+        ),
+        std::time::Duration::from_secs(1),
+    );
 
     let mut parser = codepaths::new_parser(language)?;
 
