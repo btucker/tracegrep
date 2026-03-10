@@ -463,6 +463,8 @@ def configure_condition_environment(worktree: Path, condition: str) -> None:
     tg_binary_path = local_tg_path(worktree)
     cache_root = local_cache_root(worktree)
 
+    write_worktree_gitignore(worktree)
+
     if condition == "tg":
         if not TRACEGREP_SKILL_SOURCE.exists():
             raise SystemExit(f"tracegrep skill source not found at {TRACEGREP_SKILL_SOURCE}")
@@ -482,6 +484,12 @@ def configure_condition_environment(worktree: Path, condition: str) -> None:
         claude_settings_path.unlink()
     remove_tree(tg_binary_path)
     remove_tree(cache_root)
+
+
+def write_worktree_gitignore(worktree: Path) -> None:
+    lines = [f"{d}/" for d in WORKTREE_SNAPSHOT_EXCLUDES]
+    lines.append(".gitignore")
+    (worktree / ".gitignore").write_text("\n".join(lines) + "\n")
 
 
 def condition_search_guidance(condition: str) -> str:
