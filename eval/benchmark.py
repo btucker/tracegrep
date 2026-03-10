@@ -18,10 +18,10 @@ import sys
 import tarfile
 import tempfile
 import textwrap
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 try:
     from rich import box
@@ -39,6 +39,15 @@ DEFAULT_FORK_OWNER = "btucker"
 DEFAULT_JUDGE_AGENT = "claude"
 SUPPORTED_AGENTS = ("codex", "claude")
 SUPPORTED_CONDITIONS = ("control", "tg")
+DISCOVERY_LANGUAGES = ("JavaScript", "Python", "Rust", "TypeScript")
+DISCOVERY_KIND_VALUES = ("bug", "feature")
+DEFAULT_DISCOVERY_MIN_STARS = 2000
+DEFAULT_DISCOVERY_MIN_SIZE_KB = 5000
+DEFAULT_DISCOVERY_REPO_LIMIT = 12
+DEFAULT_DISCOVERY_PRS_PER_REPO = 16
+DEFAULT_DISCOVERY_POOL_SIZE = 20
+DEFAULT_DISCOVERY_CANDIDATE_COUNT = 8
+DEFAULT_DISCOVERY_CUTOFF_DAYS = 183
 TRACEGREP_SKILL_SOURCE = SCRIPT_DIR.parent / "skills" / "tracegrep"
 BENCHMARK_EXPORT_NAME = "tracegrep-eval"
 BENCHMARK_EXPORT_EMAIL = "tracegrep-eval@example.com"
@@ -147,6 +156,99 @@ JUDGE_SCHEMA: dict[str, Any] = {
     },
 }
 
+DISCOVERY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "candidates"],
+    "properties": {
+        "summary": {"type": "string"},
+        "candidates": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "repo_name",
+                    "issue_number",
+                    "pr_number",
+                    "kind",
+                    "fit_score",
+                    "rationale",
+                    "prompt_title",
+                    "prompt_body",
+                    "evaluation_focus",
+                ],
+                "properties": {
+                    "repo_name": {"type": "string"},
+                    "issue_number": {"type": "integer", "minimum": 1},
+                    "pr_number": {"type": "integer", "minimum": 1},
+                    "kind": {"type": "string", "enum": list(DISCOVERY_KIND_VALUES)},
+                    "fit_score": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "rationale": {"type": "string"},
+                    "prompt_title": {"type": "string"},
+                    "prompt_body": {"type": "string"},
+                    "evaluation_focus": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+DISCOVERY_PULL_REQUEST_QUERY = """
+query($searchQuery: String!, $limit: Int!) {
+  search(query: $searchQuery, type: ISSUE, first: $limit) {
+    nodes {
+      __typename
+      ... on PullRequest {
+        number
+        title
+        url
+        mergedAt
+        changedFiles
+        additions
+        deletions
+        author {
+          login
+        }
+        mergeCommit {
+          oid
+          parents(first: 2) {
+            nodes {
+              oid
+            }
+          }
+        }
+        closingIssuesReferences(first: 10) {
+          nodes {
+            number
+            title
+            url
+            createdAt
+            closedAt
+            bodyText
+            author {
+              login
+            }
+            labels(first: 20) {
+              nodes {
+                name
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
+
 
 def load_tasks() -> dict[str, dict[str, Any]]:
     tasks = json.loads(TASKS_PATH.read_text())
@@ -195,6 +297,10 @@ def reports_dir(root: Path) -> Path:
 
 def evaluation_report_path(root: Path, task_id: str, agent: str, eval_id: str) -> Path:
     return reports_dir(root) / task_id / agent / f"{eval_id}.md"
+
+
+def discovery_dir(root: Path, agent: str, run_id: str) -> Path:
+    return root / "discovery" / f"{run_id}-{agent}"
 
 
 def local_tg_path(worktree: Path) -> Path:
@@ -395,6 +501,7 @@ def build_prompt(task: dict[str, Any], condition: str) -> str:
             Constraints:
             - Work only from the checked-out repository state and this prompt.
             - Do not browse the web, open GitHub issues or PRs, or inspect repository history beyond the current checkout.
+            - Do not run `git fetch`, `git pull`, `git checkout`, or other commands that consult remotes or change the benchmark baseline.
             - Keep the change consistent with the surrounding code and tests.
             - Run relevant tests or checks before finishing, and mention what you ran.
             """
@@ -806,6 +913,87 @@ def cmd_prepare(tasks: dict[str, dict[str, Any]], task_ids: list[str], root: Pat
     return 0
 
 
+def cmd_discover(
+    tasks: dict[str, dict[str, Any]],
+    root: Path,
+    *,
+    agent: str,
+    model: str | None,
+    pr_cutoff: date,
+    repo_limit: int,
+    prs_per_repo: int,
+    pool_size: int,
+    candidate_count: int,
+    min_stars: int,
+    min_size_kb: int,
+) -> int:
+    ensure_root(root)
+    run_id = new_eval_id()
+    output_dir = discovery_dir(root, agent, run_id)
+    output_dir.mkdir(parents=True, exist_ok=False)
+
+    raw_candidates = collect_discovery_pool(
+        tasks,
+        repo_limit=repo_limit,
+        prs_per_repo=prs_per_repo,
+        pool_size=pool_size,
+        min_stars=min_stars,
+        min_size_kb=min_size_kb,
+        pr_cutoff=pr_cutoff,
+    )
+    if not raw_candidates:
+        raise SystemExit(
+            "No discovery candidates matched the current filters. "
+            "Loosen the repo limits or move the PR cutoff earlier."
+        )
+
+    search_params = {
+        "repo_limit": repo_limit,
+        "prs_per_repo": prs_per_repo,
+        "pool_size": pool_size,
+        "candidate_count": candidate_count,
+        "min_stars": min_stars,
+        "min_size_kb": min_size_kb,
+    }
+    generated_at = datetime.now(timezone.utc).isoformat()
+    write_json(
+        output_dir / "raw_candidates.json",
+        {
+            "generated_at": generated_at,
+            "pr_cutoff": pr_cutoff.isoformat(),
+            "search_params": search_params,
+            "candidates": raw_candidates,
+        },
+    )
+    prompt = build_discovery_prompt(raw_candidates, candidate_count=candidate_count, pr_cutoff=pr_cutoff)
+    write_text(output_dir / "selection_prompt.md", prompt)
+    selection = run_discovery_agent(agent, prompt, cwd=output_dir, model=model)
+    validate_discovery_selection(selection, raw_candidates, candidate_count=candidate_count)
+    write_json(output_dir / "selection.json", selection)
+
+    shortlist = build_discovery_shortlist(
+        selection,
+        raw_candidates,
+        agent=agent,
+        model=model,
+        generated_at=generated_at,
+        pr_cutoff=pr_cutoff,
+        search_params=search_params,
+    )
+    write_json(output_dir / "shortlist.json", shortlist)
+    write_text(output_dir / "report.md", build_discovery_markdown(shortlist))
+
+    print(f"discovered {len(shortlist['candidates'])} candidates at {output_dir}")
+    print(f"pr cutoff: {pr_cutoff.isoformat()}")
+    print(f"report: {output_dir / 'report.md'}")
+    for candidate in shortlist["candidates"]:
+        print(
+            f"- [{candidate['kind']}] {candidate['repo']['name']} issue #{candidate['issue']['number']} "
+            f"-> PR #{candidate['ground_truth']['pr_number']}"
+        )
+    return 0
+
+
 def cmd_launch(
     tasks: dict[str, dict[str, Any]],
     task_id: str,
@@ -855,18 +1043,473 @@ def new_eval_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def latest_eval_dir(root: Path, task_id: str, agent: str) -> Path:
+def default_discovery_pr_cutoff() -> date:
+    return datetime.now(timezone.utc).date() - timedelta(days=DEFAULT_DISCOVERY_CUTOFF_DAYS)
+
+
+def parse_cli_date(value: str) -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD date, got {value!r}") from exc
+
+
+def gh_api_json(args: list[str]) -> Any:
+    require_command("gh")
+    completed = run(["gh", "api", *args], capture_output=True)
+    return json.loads(completed.stdout)
+
+
+def gh_graphql_json(query: str, variables: dict[str, Any]) -> Any:
+    command = ["gh", "api", "graphql", "-f", f"query={query}"]
+    for key, value in variables.items():
+        command.extend(["-F", f"{key}={value}"])
+    completed = run(command, capture_output=True)
+    return json.loads(completed.stdout)
+
+
+def truncate_text(value: str, limit: int = 600) -> str:
+    collapsed = " ".join(value.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 3].rstrip() + "..."
+
+
+def candidate_key(repo_name: str, issue_number: int, pr_number: int) -> tuple[str, int, int]:
+    return (repo_name, issue_number, pr_number)
+
+
+def candidate_kind_hint(title: str, labels: list[str], body: str) -> str:
+    tokens = " ".join([title, body, *labels]).lower()
+    bug_markers = ("bug", "regression", "crash", "error", "incorrect", "broken", "fails", "failure", "fix")
+    feature_markers = ("feature", "enhancement", "proposal", "rfc", "support", "add ", "allow", "option", "request")
+    if any(marker in tokens for marker in bug_markers):
+        return "bug"
+    if any(marker in tokens for marker in feature_markers):
+        return "feature"
+    return "unknown"
+
+
+def search_candidate_repositories(
+    *,
+    limit: int,
+    min_stars: int,
+    min_size_kb: int,
+) -> list[dict[str, Any]]:
+    search_limit = min(max(limit * 4, limit), 100)
+    query = " ".join(
+        [
+            "archived:false",
+            "fork:false",
+            "mirror:false",
+            "template:false",
+            "is:public",
+            "license:mit",
+            f"stars:>={min_stars}",
+            f"size:>={min_size_kb}",
+        ]
+    )
+    url = "https://api.github.com/search/repositories?" + urlencode(
+        {
+            "q": query,
+            "sort": "stars",
+            "order": "desc",
+            "per_page": search_limit,
+        }
+    )
+    payload = gh_api_json([url])
+    repos = []
+    for item in payload.get("items", []):
+        language = item.get("language")
+        license_info = item.get("license") or {}
+        if language not in DISCOVERY_LANGUAGES:
+            continue
+        if license_info.get("spdx_id") != "MIT":
+            continue
+        repos.append(
+            {
+                "name": item["full_name"],
+                "url": item["html_url"],
+                "git_url": item["clone_url"],
+                "description": item.get("description") or "",
+                "language": language,
+                "license": "MIT",
+                "stars": item["stargazers_count"],
+                "size_kb": item["size"],
+            }
+        )
+        if len(repos) >= limit:
+            break
+    return repos
+
+
+def search_recent_repo_candidates(
+    repo: dict[str, Any],
+    *,
+    pr_cutoff: date,
+    limit: int,
+) -> list[dict[str, Any]]:
+    query = f"repo:{repo['name']} is:pr is:merged merged:>={pr_cutoff.isoformat()} sort:updated-desc"
+    payload = gh_graphql_json(
+        DISCOVERY_PULL_REQUEST_QUERY,
+        {"searchQuery": query, "limit": limit},
+    )
+    nodes = payload.get("data", {}).get("search", {}).get("nodes", [])
+    candidates = []
+    for node in nodes:
+        if node.get("__typename") != "PullRequest":
+            continue
+        pr_author = ((node.get("author") or {}).get("login") or "").strip()
+        merge_commit = node.get("mergeCommit") or {}
+        parents = (merge_commit.get("parents") or {}).get("nodes") or []
+        if not pr_author or not merge_commit.get("oid") or not parents:
+            continue
+        closing_issues = (node.get("closingIssuesReferences") or {}).get("nodes") or []
+        for issue in closing_issues:
+            issue_author = ((issue.get("author") or {}).get("login") or "").strip()
+            if not issue_author or issue_author == pr_author:
+                continue
+            labels = [label["name"] for label in (issue.get("labels") or {}).get("nodes", [])]
+            body = issue.get("bodyText") or ""
+            candidates.append(
+                {
+                    "repo": repo,
+                    "issue": {
+                        "number": issue["number"],
+                        "url": issue["url"],
+                        "title": issue["title"],
+                        "author": issue_author,
+                        "created_at": issue["createdAt"],
+                        "closed_at": issue.get("closedAt"),
+                        "labels": labels,
+                        "body_excerpt": truncate_text(body),
+                    },
+                    "pr": {
+                        "number": node["number"],
+                        "url": node["url"],
+                        "title": node["title"],
+                        "author": pr_author,
+                        "merged_at": node["mergedAt"],
+                        "merge_commit": merge_commit["oid"],
+                        "pre_fix_commit": parents[0]["oid"],
+                        "changed_files": node.get("changedFiles"),
+                        "additions": node.get("additions"),
+                        "deletions": node.get("deletions"),
+                    },
+                    "kind_hint": candidate_kind_hint(issue["title"], labels, body),
+                }
+            )
+            break
+    return candidates
+
+
+def collect_discovery_pool(
+    tasks: dict[str, dict[str, Any]],
+    *,
+    repo_limit: int,
+    prs_per_repo: int,
+    pool_size: int,
+    min_stars: int,
+    min_size_kb: int,
+    pr_cutoff: date,
+) -> list[dict[str, Any]]:
+    pool: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = {
+        candidate_key(task["repo"]["name"], task["issue"]["number"], task["ground_truth"]["pr_number"])
+        for task in tasks.values()
+    }
+    repos = search_candidate_repositories(limit=repo_limit, min_stars=min_stars, min_size_kb=min_size_kb)
+    for repo in repos:
+        repo_candidates = search_recent_repo_candidates(repo, pr_cutoff=pr_cutoff, limit=prs_per_repo)
+        for candidate in repo_candidates:
+            key = candidate_key(
+                candidate["repo"]["name"],
+                candidate["issue"]["number"],
+                candidate["pr"]["number"],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            pool.append(candidate)
+            if len(pool) >= pool_size:
+                return pool
+    return pool
+
+
+def build_discovery_prompt(
+    raw_candidates: list[dict[str, Any]],
+    *,
+    candidate_count: int,
+    pr_cutoff: date,
+) -> str:
+    prompt_input = []
+    for candidate in raw_candidates:
+        prompt_input.append(
+            {
+                "repo": {
+                    "name": candidate["repo"]["name"],
+                    "url": candidate["repo"]["url"],
+                    "language": candidate["repo"]["language"],
+                    "stars": candidate["repo"]["stars"],
+                    "size_kb": candidate["repo"]["size_kb"],
+                    "description": candidate["repo"]["description"],
+                },
+                "issue": candidate["issue"],
+                "pr": candidate["pr"],
+                "kind_hint": candidate["kind_hint"],
+            }
+        )
+    return textwrap.dedent(
+        f"""\
+        You are curating new benchmark candidates for the tracegrep evaluation harness.
+
+        Goal:
+        - Select up to {candidate_count} issue/PR pairs from the provided pool.
+        - Keep a mix of bugs and features when the pool allows it.
+        - Prefer tasks where tracegrep is likely to matter because the accepted change should require navigating an existing medium-to-large codebase.
+        - Favor candidates that look self-contained enough to benchmark, but still substantial enough to differentiate agent behavior.
+        - Do not invent candidates outside the provided pool.
+
+        Hard constraints already enforced before you see the pool:
+        - public repo
+        - MIT license
+        - supported primary language for tracegrep benchmarking
+        - medium-to-large repository size
+        - popular repository
+        - PR author differs from the issue reporter
+        - PR merged on or after {pr_cutoff.isoformat()} to reduce training-data contamination risk
+
+        For each selected candidate:
+        - choose `kind` as either `bug` or `feature`
+        - explain briefly why it is benchmark-worthy
+        - draft a benchmark-safe prompt title/body that describes the task without leaking the accepted solution
+        - provide 2 to 4 evaluation-focus bullets
+
+        Output only JSON matching the schema.
+
+        Candidate pool:
+        {json.dumps(prompt_input, indent=2)}
+        """
+    ).strip() + "\n"
+
+
+def validate_discovery_selection(
+    payload: dict[str, Any],
+    raw_candidates: list[dict[str, Any]],
+    *,
+    candidate_count: int,
+) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("Discovery output was not a JSON object.")
+    if not isinstance(payload.get("summary"), str):
+        raise ValueError("Discovery summary must be a string.")
+    selected = payload.get("candidates")
+    if not isinstance(selected, list) or not selected:
+        raise ValueError("Discovery candidates must be a non-empty list.")
+    if len(selected) > candidate_count:
+        raise ValueError(f"Discovery returned {len(selected)} candidates, expected at most {candidate_count}.")
+
+    valid_keys = {
+        candidate_key(item["repo"]["name"], item["issue"]["number"], item["pr"]["number"]): item
+        for item in raw_candidates
+    }
+    seen: set[tuple[str, int, int]] = set()
+    selected_kinds: set[str] = set()
+    for item in selected:
+        for key in ("repo_name", "issue_number", "pr_number", "rationale", "prompt_title", "prompt_body"):
+            if not isinstance(item.get(key), str if key in {"repo_name", "rationale", "prompt_title", "prompt_body"} else int):
+                raise ValueError(f"Discovery candidate field {key} had the wrong type.")
+        if item.get("kind") not in DISCOVERY_KIND_VALUES:
+            raise ValueError("Discovery candidate kind must be bug or feature.")
+        fit_score = item.get("fit_score")
+        if not isinstance(fit_score, int) or not (1 <= fit_score <= 5):
+            raise ValueError("Discovery fit_score must be an integer between 1 and 5.")
+        focus = item.get("evaluation_focus")
+        if not isinstance(focus, list) or not (2 <= len(focus) <= 4) or not all(isinstance(entry, str) for entry in focus):
+            raise ValueError("Discovery evaluation_focus must contain 2 to 4 strings.")
+        key = candidate_key(item["repo_name"], item["issue_number"], item["pr_number"])
+        if key not in valid_keys:
+            raise ValueError(f"Discovery selected a candidate not present in the raw pool: {key}")
+        if key in seen:
+            raise ValueError(f"Discovery selected the same candidate twice: {key}")
+        seen.add(key)
+        selected_kinds.add(item["kind"])
+
+    available_kinds = {
+        item["kind_hint"] for item in raw_candidates if item["kind_hint"] in DISCOVERY_KIND_VALUES
+    }
+    if available_kinds == set(DISCOVERY_KIND_VALUES) and selected_kinds != set(DISCOVERY_KIND_VALUES):
+        raise ValueError("Discovery selection did not keep a bug/feature mix even though the pool allowed it.")
+
+
+def build_discovery_shortlist(
+    selection: dict[str, Any],
+    raw_candidates: list[dict[str, Any]],
+    *,
+    agent: str,
+    model: str | None,
+    generated_at: str,
+    pr_cutoff: date,
+    search_params: dict[str, Any],
+) -> dict[str, Any]:
+    source_map = {
+        candidate_key(item["repo"]["name"], item["issue"]["number"], item["pr"]["number"]): item
+        for item in raw_candidates
+    }
+    candidates = []
+    for rank, item in enumerate(selection["candidates"], start=1):
+        source = source_map[candidate_key(item["repo_name"], item["issue_number"], item["pr_number"])]
+        candidates.append(
+            {
+                "rank": rank,
+                "repo": source["repo"],
+                "issue": source["issue"],
+                "ground_truth": {
+                    "pr_number": source["pr"]["number"],
+                    "pr_url": source["pr"]["url"],
+                    "merge_commit": source["pr"]["merge_commit"],
+                    "pre_fix_commit": source["pr"]["pre_fix_commit"],
+                    "merged_at": source["pr"]["merged_at"],
+                    "pr_author": source["pr"]["author"],
+                },
+                "kind": item["kind"],
+                "fit_score": item["fit_score"],
+                "rationale": item["rationale"],
+                "prompt": {
+                    "title": item["prompt_title"],
+                    "body": item["prompt_body"],
+                },
+                "evaluation_focus": item["evaluation_focus"],
+                "kind_hint": source["kind_hint"],
+                "issue_reporter": source["issue"]["author"],
+            }
+        )
+    return {
+        "generated_at": generated_at,
+        "agent": agent,
+        "model": model,
+        "pr_cutoff": pr_cutoff.isoformat(),
+        "summary": selection["summary"],
+        "search_params": search_params,
+        "raw_pool_size": len(raw_candidates),
+        "candidates": candidates,
+    }
+
+
+def build_discovery_markdown(shortlist: dict[str, Any]) -> str:
+    lines = [
+        "# Benchmark Discovery Report",
+        "",
+        f"- Generated at: `{shortlist['generated_at']}`",
+        f"- Agent: `{shortlist['agent']}`",
+        f"- Model: `{shortlist['model'] or 'default'}`",
+        f"- PR cutoff: `{shortlist['pr_cutoff']}`",
+        f"- Raw pool size: `{shortlist['raw_pool_size']}`",
+        "",
+        "## Summary",
+        shortlist["summary"],
+    ]
+    for candidate in shortlist["candidates"]:
+        lines.extend(
+            [
+                "",
+                f"## {candidate['rank']}. {candidate['repo']['name']} #{candidate['issue']['number']}",
+                f"- Kind: `{candidate['kind']}` (hint: `{candidate['kind_hint']}`)",
+                f"- Repo: {candidate['repo']['language']} | {candidate['repo']['stars']} stars | {candidate['repo']['size_kb']} KB",
+                f"- Issue: [{candidate['issue']['title']}]({candidate['issue']['url']}) by `{candidate['issue_reporter']}`",
+                f"- PR: [#{candidate['ground_truth']['pr_number']}]({candidate['ground_truth']['pr_url']}) by `{candidate['ground_truth']['pr_author']}` merged `{candidate['ground_truth']['merged_at']}`",
+                f"- Rationale: {candidate['rationale']}",
+                "",
+                "### Prompt Draft",
+                f"- Title: {candidate['prompt']['title']}",
+                f"- Body: {candidate['prompt']['body']}",
+                "",
+                "### Evaluation Focus",
+                *(f"- {item}" for item in candidate["evaluation_focus"]),
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def run_discovery_claude(prompt: str, *, cwd: Path, model: str | None) -> dict[str, Any]:
+    require_command("claude")
+    command = [
+        "claude",
+        "-p",
+        "--output-format",
+        "json",
+        "--json-schema",
+        json.dumps(DISCOVERY_SCHEMA),
+        "--permission-mode",
+        "default",
+    ]
+    if model:
+        command.extend(["--model", model])
+    completed = run(command, cwd=cwd, capture_output=True, input_text=prompt)
+    payload = parse_judge_output(completed.stdout)
+    if not isinstance(payload, dict):
+        raise ValueError("Discovery output was not a JSON object.")
+    return payload
+
+
+def run_discovery_codex(prompt: str, *, cwd: Path, model: str | None) -> dict[str, Any]:
+    require_command("codex")
+    with tempfile.TemporaryDirectory(prefix="tracegrep-discovery-schema-") as tmpdir:
+        schema_path = Path(tmpdir) / "discovery_schema.json"
+        output_path = Path(tmpdir) / "discovery_output.json"
+        write_json(schema_path, DISCOVERY_SCHEMA)
+        command = [
+            "codex",
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--color",
+            "never",
+            "-s",
+            "read-only",
+            "-C",
+            str(cwd),
+            "--output-schema",
+            str(schema_path),
+            "-o",
+            str(output_path),
+        ]
+        if model:
+            command.extend(["--model", model])
+        command.append("-")
+        completed = run(command, cwd=cwd, capture_output=True, input_text=prompt)
+        raw = output_path.read_text() if output_path.exists() else completed.stdout
+    payload = parse_judge_output(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("Discovery output was not a JSON object.")
+    return payload
+
+
+def run_discovery_agent(agent: str, prompt: str, *, cwd: Path, model: str | None) -> dict[str, Any]:
+    if agent == "claude":
+        return run_discovery_claude(prompt, cwd=cwd, model=model)
+    if agent == "codex":
+        return run_discovery_codex(prompt, cwd=cwd, model=model)
+    raise SystemExit(f"Unsupported discovery agent: {agent}")
+
+
+def latest_eval_dir_if_any(root: Path, task_id: str, agent: str) -> Path | None:
     base = evaluations_root(root, task_id, agent)
     if not base.exists():
-        raise SystemExit(
-            f"No evaluations found for {task_id} agent {agent}. Run `judge` first."
-        )
+        return None
     entries = sorted(path for path in base.iterdir() if path.is_dir())
     if not entries:
+        return None
+    return entries[-1]
+
+
+def latest_eval_dir(root: Path, task_id: str, agent: str) -> Path:
+    latest = latest_eval_dir_if_any(root, task_id, agent)
+    if latest is None:
         raise SystemExit(
             f"No evaluations found for {task_id} agent {agent}. Run `judge` first."
         )
-    return entries[-1]
+    return latest
 
 
 def resolve_eval_dir(root: Path, task_id: str, agent: str, eval_id: str | None) -> Path:
@@ -1168,8 +1811,16 @@ def extract_json_object(text: str) -> Any:
     raise ValueError("Could not find a JSON object in judge output.")
 
 
+def is_judgment_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(payload)
+
+
+def is_discovery_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and {"summary", "candidates"} <= set(payload)
+
+
 def unwrap_possible_json_payload(payload: Any) -> Any:
-    if isinstance(payload, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(payload):
+    if is_judgment_payload(payload) or is_discovery_payload(payload):
         return payload
     if isinstance(payload, dict):
         for key in ("structured_output", "result", "content", "output", "message", "final", "final_message"):
@@ -1178,7 +1829,7 @@ def unwrap_possible_json_payload(payload: Any) -> Any:
             value = payload[key]
             if isinstance(value, dict):
                 unwrapped = unwrap_possible_json_payload(value)
-                if isinstance(unwrapped, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(unwrapped):
+                if is_judgment_payload(unwrapped) or is_discovery_payload(unwrapped):
                     return unwrapped
             if isinstance(value, str):
                 try:
@@ -1188,12 +1839,12 @@ def unwrap_possible_json_payload(payload: Any) -> Any:
         if "messages" in payload and isinstance(payload["messages"], list):
             for item in payload["messages"]:
                 unwrapped = unwrap_possible_json_payload(item)
-                if isinstance(unwrapped, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(unwrapped):
+                if is_judgment_payload(unwrapped) or is_discovery_payload(unwrapped):
                     return unwrapped
     if isinstance(payload, list):
         for item in payload:
             unwrapped = unwrap_possible_json_payload(item)
-            if isinstance(unwrapped, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(unwrapped):
+            if is_judgment_payload(unwrapped) or is_discovery_payload(unwrapped):
                 return unwrapped
     return payload
 
@@ -1368,6 +2019,10 @@ def overall_ranking_labels(judgment: dict[str, Any]) -> list[str]:
     return ["accepted_pr", "A", "B"]
 
 
+def best_of_all_three(judgment: dict[str, Any], blind_manifest: dict[str, Any]) -> str:
+    return reveal_ranking_item(overall_ranking_labels(judgment)[0], blind_manifest)
+
+
 def condition_scores(judgment: dict[str, Any], blind_manifest: dict[str, Any]) -> dict[str, dict[str, int]]:
     label_for = blind_manifest["condition_to_label"]
     return {
@@ -1424,6 +2079,7 @@ def build_report_markdown(
     strengths = condition_nested_list(judgment, blind_manifest, "notable_strengths")
     risks = condition_nested_list(judgment, blind_manifest, "notable_risks")
     overall_winner = reveal_winner(judgment["better_overall"], blind_manifest)
+    best_three = best_of_all_three(judgment, blind_manifest)
     pr_winner = reveal_winner(judgment["better_matches_pr"], blind_manifest)
     overall_ranking = " > ".join(
         f"`{reveal_ranking_item(label, blind_manifest)}`" for label in overall_ranking_labels(judgment)
@@ -1469,61 +2125,63 @@ def build_report_markdown(
             f"| tg | {scores['tg']['pr_alignment']} | {scores['tg']['reuse_alignment']} | {scores['tg']['duplication_risk']} | {scores['tg']['test_alignment']} |",
         ]
     )
-    return textwrap.dedent(
-        f"""\
-        # Benchmark Report: {task['id']}
-
-        ## Task Metadata
-        - Repo: {task['repo']['name']}
-        - Issue: [#{task['issue']['number']}]({task['issue']['url']}) {task['issue']['title']}
-        - Human PR: [#{task['ground_truth']['pr_number']}]({task['ground_truth']['pr_url']})
-        - Evaluated agent: `{evaluated_agent}`
-        - Judge agent: `{judge_agent}`
-        - Eval ID: `{eval_id}`
-        - Report path: `{report_rel}`
-
-        ## Blind Verdict Summary
-        - Better matches the accepted PR: `{pr_winner}`
-        - Better overall: `{overall_winner}`
-        - Overall ranking: {overall_ranking}
-        - Judge confidence: `{judgment['confidence']}`
-
-        ## Blind Mapping
-        {mapping_rows}
-
-        ## Score Table
-        {score_rows}
-
-        ## Control vs Human PR
-        ### Key differences
-        {format_bullets(differences_vs_pr['control'])}
-
-        ### Strengths
-        {format_bullets(strengths['control'])}
-
-        ### Risks
-        {format_bullets(risks['control'])}
-
-        ## TG vs Human PR
-        ### Key differences
-        {format_bullets(differences_vs_pr['tg'])}
-
-        ### Strengths
-        {format_bullets(strengths['tg'])}
-
-        ### Risks
-        {format_bullets(risks['tg'])}
-
-        ## Control vs TG
-        {format_bullets(control_vs_tg)}
-
-        ## Published GitHub Links
-        {'\n'.join(link_section)}
-
-        ## Final Summary
-        {judgment['summary']}
-        """
-    ).strip() + "\n"
+    return "\n".join(
+        [
+            f"# Benchmark Report: {task['id']}",
+            "",
+            "## Task Metadata",
+            f"- Repo: {task['repo']['name']}",
+            f"- Issue: [#{task['issue']['number']}]({task['issue']['url']}) {task['issue']['title']}",
+            f"- Human PR: [#{task['ground_truth']['pr_number']}]({task['ground_truth']['pr_url']})",
+            f"- Evaluated agent: `{evaluated_agent}`",
+            f"- Judge agent: `{judge_agent}`",
+            f"- Eval ID: `{eval_id}`",
+            f"- Report path: `{report_rel}`",
+            "",
+            "## Blind Verdict Summary",
+            f"- Better matches the accepted PR: `{pr_winner}`",
+            f"- Better overall (`control` vs `tg`): `{overall_winner}`",
+            f"- Best of all three: `{best_three}`",
+            f"- Overall ranking: {overall_ranking}",
+            f"- Judge confidence: `{judgment['confidence']}`",
+            "",
+            "## Blind Mapping",
+            mapping_rows,
+            "",
+            "## Score Table",
+            score_rows,
+            "",
+            "## Control vs Human PR",
+            "### Key differences",
+            format_bullets(differences_vs_pr["control"]),
+            "",
+            "### Strengths",
+            format_bullets(strengths["control"]),
+            "",
+            "### Risks",
+            format_bullets(risks["control"]),
+            "",
+            "## TG vs Human PR",
+            "### Key differences",
+            format_bullets(differences_vs_pr["tg"]),
+            "",
+            "### Strengths",
+            format_bullets(strengths["tg"]),
+            "",
+            "### Risks",
+            format_bullets(risks["tg"]),
+            "",
+            "## Control vs TG",
+            format_bullets(control_vs_tg),
+            "",
+            "## Published GitHub Links",
+            "\n".join(link_section),
+            "",
+            "## Final Summary",
+            judgment["summary"],
+            "",
+        ]
+    )
 
 
 def build_matrix_entry(
@@ -1550,7 +2208,8 @@ def build_matrix_entry(
         "judge_agent": judge_agent,
         "eval_id": eval_id,
         "better_matches_pr": reveal_winner(judgment["better_matches_pr"], blind_manifest),
-        "better_overall": reveal_winner(judgment["better_overall"], blind_manifest),
+        "better_overall_pair": reveal_winner(judgment["better_overall"], blind_manifest),
+        "best_of_all_three": best_of_all_three(judgment, blind_manifest),
         "confidence": judgment["confidence"],
         "control_pr_alignment": scores["control"]["pr_alignment"],
         "tg_pr_alignment": scores["tg"]["pr_alignment"],
@@ -1568,8 +2227,8 @@ def build_matrix_markdown(entries: list[dict[str, Any]]) -> str:
     lines = [
         "# Benchmark Matrix",
         "",
-        "| Task | Agent | Judge | Better vs PR | Better overall | PR align control | PR align tg | Reuse control | Reuse tg | Duplication risk control | Duplication risk tg | Confidence | Control branch | TG branch | Report |",
-        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+        "| Task | Agent | Judge | Better vs PR | Better overall (control vs tg) | Best of all three | PR align control | PR align tg | Reuse control | Reuse tg | Duplication risk control | Duplication risk tg | Confidence | Control branch | TG branch | Report |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
     ]
     for entry in entries:
         lines.append(
@@ -1580,7 +2239,8 @@ def build_matrix_markdown(entries: list[dict[str, Any]]) -> str:
                     entry["evaluated_agent"],
                     entry["judge_agent"],
                     entry["better_matches_pr"],
-                    entry["better_overall"],
+                    entry["better_overall_pair"],
+                    entry["best_of_all_three"],
                     str(entry["control_pr_alignment"]),
                     str(entry["tg_pr_alignment"]),
                     str(entry["control_reuse_alignment"]),
@@ -1595,6 +2255,12 @@ def build_matrix_markdown(entries: list[dict[str, Any]]) -> str:
             )
             + " |"
         )
+    lines.extend(
+        [
+            "",
+            "_How to read this table: higher 1-5 scores are better. `PR align` measures closeness to the accepted PR, `Reuse` measures alignment with existing code patterns, and `Duplication risk` reflects how well the implementation avoids unnecessary duplication. `Better overall (control vs tg)` is the head-to-head winner between the two benchmark implementations, while `Best of all three` can also be `accepted_pr`._",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -1877,10 +2543,19 @@ def cmd_report_all(
 ) -> int:
     selected = task_ids or list(tasks.keys())
     entries = []
+    included = []
+    skipped = []
     for task_id in selected:
         task = tasks[task_id]
-        eval_path = latest_eval_dir(root, task_id, evaluated_agent)
-        judgment = load_json(eval_path / "judgment.json")
+        eval_path = latest_eval_dir_if_any(root, task_id, evaluated_agent)
+        if eval_path is None:
+            skipped.append(f"{task_id} ({evaluated_agent}): no runs found")
+            continue
+        judgment_path = eval_path / "judgment.json"
+        if not judgment_path.exists():
+            skipped.append(f"{task_id} ({evaluated_agent} {eval_path.name}): not judged")
+            continue
+        judgment = load_json(judgment_path)
         report_path = render_report_for_eval(
             task=task,
             evaluated_agent=evaluated_agent,
@@ -1895,6 +2570,7 @@ def cmd_report_all(
             maybe = normalize_publish_metadata(load_json(publish_path))
             if maybe and maybe.get("published"):
                 publish_meta = maybe
+        included.append(f"{task_id} ({evaluated_agent} {eval_path.name})")
         entries.append(
             build_matrix_entry(
                 task=task,
@@ -1908,6 +2584,16 @@ def cmd_report_all(
                 root=root,
             )
         )
+    if included:
+        print("included runs:")
+        for item in included:
+            print(f"- {item}")
+    if skipped:
+        print("skipped runs:")
+        for item in skipped:
+            print(f"- {item}")
+    if not entries:
+        raise SystemExit("No judged evaluations found for the selected tasks.")
     reports = reports_dir(root)
     markdown = build_matrix_markdown(entries)
     write_text(reports / "matrix.md", markdown)
@@ -2000,6 +2686,29 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     show_parser = subparsers.add_parser("show", help="Show details for one task.")
     show_parser.add_argument("task_id", choices=task_ids)
 
+    discover_parser = subparsers.add_parser(
+        "discover",
+        help="Search recent GitHub issue/PR pairs and have codex or claude shortlist benchmark candidates.",
+    )
+    discover_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    discover_parser.add_argument("--model")
+    discover_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    discover_parser.add_argument(
+        "--pr-cutoff",
+        type=parse_cli_date,
+        default=default_discovery_pr_cutoff(),
+        help=(
+            "Require merged PRs on or after this date (YYYY-MM-DD). "
+            f"Defaults to {default_discovery_pr_cutoff().isoformat()}, about six months ago."
+        ),
+    )
+    discover_parser.add_argument("--repo-limit", type=int, default=DEFAULT_DISCOVERY_REPO_LIMIT)
+    discover_parser.add_argument("--prs-per-repo", type=int, default=DEFAULT_DISCOVERY_PRS_PER_REPO)
+    discover_parser.add_argument("--pool-size", type=int, default=DEFAULT_DISCOVERY_POOL_SIZE)
+    discover_parser.add_argument("--candidate-count", type=int, default=DEFAULT_DISCOVERY_CANDIDATE_COUNT)
+    discover_parser.add_argument("--min-stars", type=int, default=DEFAULT_DISCOVERY_MIN_STARS)
+    discover_parser.add_argument("--min-size-kb", type=int, default=DEFAULT_DISCOVERY_MIN_SIZE_KB)
+
     prepare_parser = subparsers.add_parser("prepare", help="Prepare one or more tasks.")
     prepare_parser.add_argument("task_ids", nargs="*", choices=task_ids)
     prepare_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -2087,6 +2796,20 @@ def main() -> int:
         return cmd_list(tasks, args.root)
     if args.command == "show":
         return cmd_show(tasks, args.task_id)
+    if args.command == "discover":
+        return cmd_discover(
+            tasks,
+            args.root,
+            agent=args.agent,
+            model=args.model,
+            pr_cutoff=args.pr_cutoff,
+            repo_limit=args.repo_limit,
+            prs_per_repo=args.prs_per_repo,
+            pool_size=args.pool_size,
+            candidate_count=args.candidate_count,
+            min_stars=args.min_stars,
+            min_size_kb=args.min_size_kb,
+        )
     if args.command == "prepare":
         return cmd_prepare(tasks, args.task_ids, args.root, args.force)
     if args.command == "launch":

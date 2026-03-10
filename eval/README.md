@@ -6,9 +6,47 @@ The claim this harness is built to test is:
 
 - does having the agent use `tg` make a difference in the code it produces?
 
+## Methodology
+
+Each benchmark task is a historical issue/PR pair captured in `tasks.json`. The harness uses the issue text as the task prompt and treats the accepted human PR as the reference implementation for evaluation.
+
+For each task, the harness creates two detached worktrees from the same pre-fix commit:
+
+- `control`: the agent works without `tg`
+- `tg`: the agent gets the `tracegrep` integration and is expected to use it naturally
+
+The goal is not to compare two arbitrary solutions. The goal is to hold as much constant as possible and isolate one variable: whether giving the agent access to `tg` changes the implementation it produces.
+
+The task flow is:
+
+1. Prepare both worktrees from the same parent commit.
+2. Give both variants the same benchmark prompt, except that `control` forbids `tg` and `tg` prefers it.
+3. Let the agent modify each worktree independently.
+4. Snapshot the resulting repos and generate three parent-based diffs:
+   - parent -> control
+   - parent -> tg
+   - parent -> accepted human PR
+5. Blind the two benchmark implementations as `A` and `B`.
+6. Ask a judge model to do a three-way comparison across `A`, `B`, and the accepted PR.
+7. Reveal which of `A` or `B` was `control` vs `tg` only after judgment.
+
+The judge is allowed to inspect repo context, but it does not inspect the live `control` or `tg` worktrees directly. Instead, it receives blinded artifacts under `judge_workspace/`:
+
+- `A.diff`, `B.diff`, and `accepted_pr.diff`
+- sanitized exports of the resulting repo trees for `A`, `B`, and the accepted PR
+
+That design matters because the live `tg` worktree contains benchmark harness wiring such as `.codex/`, `.claude/`, `.eval-bin/`, and `.tracegrep-cache/`, which would otherwise leak the condition to the judge.
+
+The build prompts also explicitly forbid networked or baseline-changing git commands such as `git fetch`, `git pull`, and `git checkout`, so agents cannot refresh the repo or consult remote history mid-run.
+
+The outputs should be read as comparative judgments, not absolute truth. The score columns and winners come from an LLM judge, and the per-task markdown reports contain the qualitative rationale behind the matrix. The accepted PR is treated as a reference and can rank above both benchmark implementations in the three-way ranking.
+
+In normal use, `run-task` is the main entrypoint. It runs the whole benchmark flow for one task: prepare, launch `control`, launch `tg`, judge, publish, and render the report. The lower-level commands are still useful for inspection, retries, and debugging, but they are not the primary workflow.
+
 ## What it does
 
 - keeps a manifest of historical issue/PR benchmark tasks
+- can discover new candidate issue/PR pairs from GitHub for future benchmark additions
 - clones the upstream repo into `eval/workspaces/cache/`
 - creates detached pre-fix git worktrees for `control` and `tg` runs
 - writes redacted task prompts that hide the accepted PR
@@ -20,6 +58,26 @@ The claim this harness is built to test is:
 - renders per-task markdown reports and an aggregate matrix under `eval/reports/`
 
 ## Usage
+
+### Recommended: run the whole flow
+
+If you want to benchmark one task end to end, use `run-task`:
+
+```bash
+uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent codex
+uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent claude --agent-model sonnet --judge-agent codex --judge-model gpt-5
+```
+
+`run-task` is the default high-level workflow. It prepares both worktrees, runs both conditions, judges the result, optionally publishes branches, and writes the markdown report.
+
+### Inspect current state
+
+Discover recent candidate tasks with an agent-assisted shortlist:
+
+```bash
+uv run eval/benchmark.py discover --agent codex
+uv run eval/benchmark.py discover --agent claude --model sonnet --pr-cutoff 2025-09-10
+```
 
 List evaluation runs and their current state:
 
@@ -65,13 +123,6 @@ uv run eval/benchmark.py judge storybook-hide-toolbar-docs --agent codex
 uv run eval/benchmark.py judge storybook-hide-toolbar-docs --agent claude --judge-agent codex --judge-model gpt-5
 ```
 
-Run the full task flow with one command:
-
-```bash
-uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent codex
-uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent claude --agent-model sonnet --judge-agent codex --judge-model gpt-5
-```
-
 Publish the latest evaluated branches to the GitHub fork:
 
 ```bash
@@ -84,6 +135,8 @@ Render or refresh the markdown report:
 uv run eval/benchmark.py report storybook-hide-toolbar-docs --agent codex
 uv run eval/benchmark.py report-all --agent codex
 ```
+
+`report-all` skips tasks whose latest run is missing or unjudged and prints those skipped runs before writing the aggregate matrix.
 
 Pass extra flags to the underlying CLI after `--`:
 
@@ -101,6 +154,14 @@ Model selection notes:
 - `run-task` rejects using both `--agent-model` and a forwarded `--model`/`-m` after `--` at the same time.
 
 ## Output layout
+
+Discovery creates:
+
+- `eval/workspaces/discovery/<timestamp>-<agent>/raw_candidates.json`
+- `eval/workspaces/discovery/<timestamp>-<agent>/selection_prompt.md`
+- `eval/workspaces/discovery/<timestamp>-<agent>/selection.json`
+- `eval/workspaces/discovery/<timestamp>-<agent>/shortlist.json`
+- `eval/workspaces/discovery/<timestamp>-<agent>/report.md`
 
 Preparing a task creates:
 
@@ -154,6 +215,7 @@ For the `tg` worktree only, `prepare` also creates:
 ## Notes
 
 - The prompts tell agents not to browse the web or inspect PR history.
+- The prompts also forbid `git fetch`, `git pull`, `git checkout`, and similar commands that would consult remotes or change the benchmark baseline.
 - The `control` prompt explicitly forbids `tg`.
 - The `tg` prompt explicitly prefers `tg`/`tracegrep` for supported source files.
 - The benchmark is about agent use of `tg`, so the `tg` condition includes the agent-specific skill/plugin wiring needed to expose it naturally.
@@ -169,3 +231,6 @@ For the `tg` worktree only, `prepare` also creates:
 - Public publishing can leak benchmark solutions into future search. Treat published branches as post-hoc artifacts, not inputs to new runs.
 - The markdown reports are meant to be committed back into this repo; the disposable run artifacts stay under `eval/workspaces/`.
 - `run-task` is the one-command sequential workflow: prepare, launch control, launch tg, judge, publish, and render the report.
+- `discover` uses GitHub search plus a structured `codex` or `claude` pass to shortlist issue/PR pairs for future benchmark additions.
+- `discover` filters to MIT-licensed public repos, skips repos already present in `tasks.json`, and currently limits the pool to tracegrep-supported primary languages (`JavaScript`, `TypeScript`, `Python`, `Rust`).
+- The default discovery recency gate is PRs merged on or after about six months before the run date. Override `--pr-cutoff YYYY-MM-DD` if you want a stricter or looser approximation of training-data freshness.

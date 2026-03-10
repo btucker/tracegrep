@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date
 from unittest import mock
 from pathlib import Path
 
@@ -97,6 +99,61 @@ class BenchmarkHarnessTests(unittest.TestCase):
             "snapshot_commits": {"tg": "feedface", "control": "deadbeef"},
         }
 
+    def example_discovery_candidate(self, *, kind_hint: str = "bug") -> dict:
+        return {
+            "repo": {
+                "name": "example/project",
+                "url": "https://github.com/example/project",
+                "git_url": "https://github.com/example/project.git",
+                "description": "Example project",
+                "language": "TypeScript",
+                "license": "MIT",
+                "stars": 5000,
+                "size_kb": 12000,
+            },
+            "issue": {
+                "number": 42,
+                "url": "https://github.com/example/project/issues/42",
+                "title": "Fix example behavior",
+                "author": "reporter",
+                "created_at": "2026-01-01T00:00:00Z",
+                "closed_at": "2026-01-03T00:00:00Z",
+                "labels": ["bug"],
+                "body_excerpt": "Issue body",
+            },
+            "pr": {
+                "number": 99,
+                "url": "https://github.com/example/project/pull/99",
+                "title": "Fix example behavior",
+                "author": "contributor",
+                "merged_at": "2026-01-02T00:00:00Z",
+                "merge_commit": "deadbeef",
+                "pre_fix_commit": "abc123",
+                "changed_files": 3,
+                "additions": 25,
+                "deletions": 7,
+            },
+            "kind_hint": kind_hint,
+        }
+
+    def example_discovery_selection(self) -> dict:
+        return {
+            "summary": "Good mix of self-contained tasks.",
+            "candidates": [
+                {
+                    "repo_name": "example/project",
+                    "issue_number": 42,
+                    "pr_number": 99,
+                    "kind": "bug",
+                    "fit_score": 4,
+                    "rationale": "Touches existing code paths without obvious solution leakage.",
+                    "prompt_title": "Fix example behavior",
+                    "prompt_body": "Investigate and fix the reported behavior in the repo.",
+                    "evaluation_focus": ["Reuse existing code.", "Keep tests aligned."],
+                }
+            ],
+        }
+
     def test_blind_manifest_is_deterministic(self) -> None:
         first = benchmark.build_blind_manifest(
             task_id="demo-task",
@@ -128,6 +185,70 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(parsed_numstat["binary.dat"]["added"], -1)
         self.assertEqual(parsed_status["binary.dat"]["status"], "A")
 
+    def test_build_prompt_forbids_remote_git_commands(self) -> None:
+        prompt = benchmark.build_prompt(self.task, "control")
+
+        self.assertIn("Do not run `git fetch`, `git pull`, `git checkout`", prompt)
+
+    def test_build_discovery_shortlist_preserves_candidate_metadata(self) -> None:
+        shortlist = benchmark.build_discovery_shortlist(
+            self.example_discovery_selection(),
+            [self.example_discovery_candidate()],
+            agent="codex",
+            model="gpt-5",
+            generated_at="2026-03-10T12:00:00Z",
+            pr_cutoff=date(2025, 9, 10),
+            search_params={"repo_limit": 1},
+        )
+
+        self.assertEqual(shortlist["agent"], "codex")
+        self.assertEqual(shortlist["candidates"][0]["ground_truth"]["pr_number"], 99)
+        self.assertEqual(shortlist["candidates"][0]["prompt"]["title"], "Fix example behavior")
+
+    def test_parse_judge_output_unwraps_discovery_structured_output(self) -> None:
+        wrapped = json.dumps(
+            {
+                "type": "result",
+                "structured_output": self.example_discovery_selection(),
+            }
+        )
+
+        self.assertEqual(benchmark.parse_judge_output(wrapped), self.example_discovery_selection())
+
+    def test_cmd_discover_writes_shortlist_artifacts(self) -> None:
+        tasks = {"demo-task": self.task}
+        raw_candidates = [self.example_discovery_candidate()]
+        selection = self.example_discovery_selection()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(benchmark, "collect_discovery_pool", return_value=raw_candidates),
+                mock.patch.object(benchmark, "run_discovery_agent", return_value=selection),
+                mock.patch("sys.stdout", stdout),
+            ):
+                exit_code = benchmark.cmd_discover(
+                    tasks,
+                    root,
+                    agent="codex",
+                    model="gpt-5",
+                    pr_cutoff=date(2025, 9, 10),
+                    repo_limit=1,
+                    prs_per_repo=1,
+                    pool_size=1,
+                    candidate_count=1,
+                    min_stars=100,
+                    min_size_kb=100,
+                )
+
+            self.assertEqual(exit_code, 0)
+            discovery_root = root / "discovery"
+            runs = [path for path in discovery_root.iterdir() if path.is_dir()]
+            self.assertEqual(len(runs), 1)
+            self.assertTrue((runs[0] / "report.md").exists())
+            self.assertTrue((runs[0] / "shortlist.json").exists())
+            self.assertIn("discovered 1 candidates", stdout.getvalue())
+
     def test_report_markdown_without_publish(self) -> None:
         report = benchmark.build_report_markdown(
             task=self.task,
@@ -139,7 +260,11 @@ class BenchmarkHarnessTests(unittest.TestCase):
             publish_meta=None,
         )
         self.assertIn("Publishing has not been run yet", report)
+        self.assertIn("\n## Task Metadata\n", report)
+        self.assertIn("\n## Blind Verdict Summary\n", report)
         self.assertIn("Better matches the accepted PR: `tg`", report)
+        self.assertIn("Better overall (`control` vs `tg`): `tie`", report)
+        self.assertIn("Best of all three: `accepted_pr`", report)
         self.assertIn("Overall ranking: `accepted_pr` > `tg` > `control`", report)
         self.assertIn("## Blind Mapping", report)
 
@@ -206,6 +331,71 @@ class BenchmarkHarnessTests(unittest.TestCase):
             self.assertTrue((root.parent / "reports" / "matrix.md").exists())
             matrix = (root.parent / "reports" / "matrix.md").read_text()
             self.assertIn("| demo-task | codex | claude |", matrix)
+            self.assertIn("Best of all three", matrix)
+            self.assertIn("How to read this table", matrix)
+
+    def test_report_all_skips_unjudged_and_missing_runs(self) -> None:
+        other_task = {
+            **self.task,
+            "id": "other-task",
+            "issue": {
+                "number": 43,
+                "url": "https://github.com/example/project/issues/43",
+                "title": "Other issue",
+            },
+            "ground_truth": {
+                **self.task["ground_truth"],
+                "pr_number": 100,
+                "pr_url": "https://github.com/example/project/pull/100",
+            },
+        }
+        missing_task = {
+            **self.task,
+            "id": "missing-task",
+            "issue": {
+                "number": 44,
+                "url": "https://github.com/example/project/issues/44",
+                "title": "Missing issue",
+            },
+            "ground_truth": {
+                **self.task["ground_truth"],
+                "pr_number": 101,
+                "pr_url": "https://github.com/example/project/pull/101",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspaces"
+            judged_dir = benchmark.evaluation_dir(root, "demo-task", "codex", "20260310T000000Z")
+            judged_dir.mkdir(parents=True, exist_ok=True)
+            benchmark.write_json(judged_dir / "judgment.json", self.example_judgment() | {"judge_agent": "claude"})
+            benchmark.write_json(judged_dir / "blind_manifest.json", self.example_blind_manifest())
+            benchmark.write_json(judged_dir / "publish.json", {"published": False})
+
+            unjudged_dir = benchmark.evaluation_dir(root, "other-task", "codex", "20260310T010000Z")
+            unjudged_dir.mkdir(parents=True, exist_ok=True)
+            benchmark.write_json(unjudged_dir / "blind_manifest.json", self.example_blind_manifest() | {"task_id": "other-task"})
+
+            tasks = {
+                "demo-task": self.task,
+                "other-task": other_task,
+                "missing-task": missing_task,
+            }
+            stdout = io.StringIO()
+            with mock.patch("sys.stdout", stdout):
+                exit_code = benchmark.cmd_report_all(tasks, [], root, evaluated_agent="codex")
+
+            self.assertEqual(exit_code, 0)
+            output = stdout.getvalue()
+            self.assertIn("included runs:", output)
+            self.assertIn("demo-task (codex 20260310T000000Z)", output)
+            self.assertIn("skipped runs:", output)
+            self.assertIn("other-task (codex 20260310T010000Z): not judged", output)
+            self.assertIn("missing-task (codex): no runs found", output)
+            matrix = (root.parent / "reports" / "matrix.md").read_text()
+            self.assertIn("| demo-task | codex | claude |", matrix)
+            self.assertNotIn("| other-task |", matrix)
+            self.assertIn("higher 1-5 scores are better", matrix)
+            self.assertIn("accepted_pr", matrix)
 
     def test_latest_eval_dir_requires_existing_eval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -653,6 +843,12 @@ class BenchmarkCliSmokeTests(unittest.TestCase):
         result = self.run_help("runs")
         self.assertEqual(result.returncode, 0)
         self.assertIn("runs", result.stdout)
+
+    def test_discover_help(self) -> None:
+        result = self.run_help("discover")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("discover", result.stdout)
+        self.assertIn("--pr-cutoff", result.stdout)
 
     def test_main_defaults_to_runs(self) -> None:
         tasks = {"demo-task": {"id": "demo-task"}}
