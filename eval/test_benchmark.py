@@ -57,6 +57,7 @@ class BenchmarkHarnessTests(unittest.TestCase):
         return {
             "better_matches_pr": "A",
             "better_overall": "tie",
+            "overall_ranking": ["accepted_pr", "A", "B"],
             "confidence": "medium",
             "scores": {
                 "A": {
@@ -139,7 +140,23 @@ class BenchmarkHarnessTests(unittest.TestCase):
         )
         self.assertIn("Publishing has not been run yet", report)
         self.assertIn("Better matches the accepted PR: `tg`", report)
+        self.assertIn("Overall ranking: `accepted_pr` > `tg` > `control`", report)
         self.assertIn("## Blind Mapping", report)
+
+    def test_report_markdown_falls_back_when_older_judgment_lacks_ranking(self) -> None:
+        judgment = self.example_judgment()
+        judgment.pop("overall_ranking")
+        report = benchmark.build_report_markdown(
+            task=self.task,
+            evaluated_agent="codex",
+            judge_agent="claude",
+            eval_id="20260310T000000Z",
+            judgment=judgment,
+            blind_manifest=self.example_blind_manifest(),
+            publish_meta=None,
+        )
+
+        self.assertIn("Overall ranking: `accepted_pr` > `tg` > `control`", report)
 
     def test_report_markdown_with_publish(self) -> None:
         publish_meta = {
@@ -212,13 +229,180 @@ class BenchmarkHarnessTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             benchmark.forwarded_build_args(["--model", "gpt-5"], "sonnet")
 
-    def test_render_task_table_falls_back_without_rich(self) -> None:
+    def test_describe_task_runs_handles_missing_prepared_and_evaluated_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            self.assertEqual(benchmark.describe_task_runs(root, "demo-task"), "-")
+
+            benchmark.run_dir(root, "demo-task").mkdir(parents=True)
+            self.assertEqual(benchmark.describe_task_runs(root, "demo-task"), "prepared")
+
+            benchmark.evaluation_dir(root, "demo-task", "codex", "20260310T120000Z").mkdir(parents=True)
+            benchmark.evaluation_dir(root, "demo-task", "codex", "20260310T130000Z").mkdir(parents=True)
+            benchmark.evaluation_dir(root, "demo-task", "claude", "20260310T140000Z").mkdir(parents=True)
+            self.assertEqual(benchmark.describe_task_runs(root, "demo-task"), "codex:2, claude:1")
+
+    def test_collect_run_records_includes_variant_and_overall_status(self) -> None:
         tasks = {"demo-task": self.task}
-        rendered = benchmark.render_plain_task_list(tasks)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            published_dir = benchmark.evaluation_dir(root, "demo-task", "codex", "20260310T140000Z")
+            published_dir.mkdir(parents=True)
+            (published_dir / "control.diff").write_text("diff")
+            (published_dir / "tg.diff").write_text("diff")
+            benchmark.write_json(published_dir / "judgment.json", self.example_judgment())
+            benchmark.write_json(
+                published_dir / "publish.json",
+                {
+                    "published": True,
+                    "branches": {
+                        "control": {"url": "https://example.com/control"},
+                        "tg": {"url": "https://example.com/tg"},
+                    },
+                },
+            )
+
+            snapshotted_dir = benchmark.evaluation_dir(root, "demo-task", "claude", "20260310T130000Z")
+            snapshotted_dir.mkdir(parents=True)
+            (snapshotted_dir / "control.diff").write_text("diff")
+
+            records = benchmark.collect_run_records(tasks, root)
+
+        self.assertEqual(
+            records,
+            [
+                {
+                    "repo": "example/project",
+                    "task": "demo-task",
+                    "agent": "codex",
+                    "run_id": "20260310T140000Z",
+                    "control": "published",
+                    "tg": "published",
+                    "status": "published",
+                },
+                {
+                    "repo": "example/project",
+                    "task": "demo-task",
+                    "agent": "claude",
+                    "run_id": "20260310T130000Z",
+                    "control": "snapshotted",
+                    "tg": "-",
+                    "status": "snapshotted",
+                },
+            ],
+        )
+
+    def test_render_plain_run_list_formats_run_records(self) -> None:
+        rendered = benchmark.render_plain_run_list(
+            [
+                {
+                    "repo": "example/project",
+                    "task": "demo-task",
+                    "agent": "codex",
+                    "run_id": "20260310T140000Z",
+                    "control": "published",
+                    "tg": "published",
+                    "status": "published",
+                }
+            ]
+        )
 
         self.assertEqual(
             rendered,
-            "demo-task: example/project | Add example feature | issue #42\n",
+            "example/project | demo-task | codex | 20260310T140000Z | control published | tg published | published\n",
+        )
+
+    def test_parse_judge_output_unwraps_claude_structured_output(self) -> None:
+        wrapped = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "",
+                "structured_output": self.example_judgment(),
+            }
+        )
+
+        self.assertEqual(benchmark.parse_judge_output(wrapped), self.example_judgment())
+
+    def test_build_judge_prompt_references_blind_artifacts_for_three_way_comparison(self) -> None:
+        judge_input = {
+            "task_id": "demo-task",
+            "evaluated_agent": "codex",
+            "eval_id": "20260310T140000Z",
+            "repo": {"name": "example/project"},
+            "issue": {"number": 42, "title": "Issue title"},
+            "prompt": {"title": "Prompt title", "body": "Prompt body"},
+            "evaluation_focus": ["Reuse code"],
+            "implementations": {
+                "A": {
+                    "diff_path": "judge_workspace/A.diff",
+                    "repo_path": "judge_workspace/A_repo",
+                    "files": {"files": []},
+                },
+                "B": {
+                    "diff_path": "judge_workspace/B.diff",
+                    "repo_path": "judge_workspace/B_repo",
+                    "files": {"files": []},
+                },
+            },
+            "ground_truth": {
+                "diff_path": "judge_workspace/accepted_pr.diff",
+                "repo_path": "judge_workspace/accepted_pr_repo",
+                "files": {"files": []},
+            },
+        }
+
+        prompt = benchmark.build_judge_prompt(judge_input)
+
+        self.assertIn("three-way comparison", prompt)
+        self.assertIn("parent -> Implementation A diff", prompt)
+        self.assertIn("judge_workspace/A.diff", prompt)
+        self.assertIn("judge_workspace/B_repo", prompt)
+        self.assertIn("overall technical merits", prompt)
+
+    def test_snapshot_worktree_commit_excludes_harness_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "Benchmark Tests"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "benchmark-tests@example.com"], cwd=repo, check=True)
+            (repo / "tracked.txt").write_text("before\n")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            base_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            (repo / "tracked.txt").write_text("after\n")
+            (repo / ".codex" / "skills").mkdir(parents=True)
+            (repo / ".codex" / "skills" / "tracegrep.md").write_text("skill\n")
+
+            snapshot = benchmark.snapshot_worktree_commit(repo, base_commit, "snapshot")
+            diff_paths = subprocess.run(
+                ["git", "diff", "--name-only", base_commit, snapshot],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+
+        self.assertEqual(diff_paths, ["tracked.txt"])
+
+    def test_render_task_table_falls_back_without_rich(self) -> None:
+        tasks = {"demo-task": self.task}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            benchmark.evaluation_dir(root, "demo-task", "codex", "20260310T120000Z").mkdir(parents=True)
+            rendered = benchmark.render_plain_task_list(tasks, root)
+
+        self.assertEqual(
+            rendered,
+            "demo-task: example/project | Add example feature | issue #42 | runs codex:1\n",
         )
 
     def test_cmd_list_prints_rich_table_when_available(self) -> None:
@@ -248,18 +432,21 @@ class BenchmarkHarnessTests(unittest.TestCase):
                 self.print_calls.append(table)
 
         fake_box = mock.Mock(SIMPLE_HEAVY="simple-heavy")
-        with (
-            mock.patch.object(benchmark, "Console", FakeConsole),
-            mock.patch.object(benchmark, "Table", FakeTable),
-            mock.patch.object(benchmark, "box", fake_box),
-        ):
-            exit_code = benchmark.cmd_list(tasks)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            benchmark.run_dir(root, "demo-task").mkdir(parents=True)
+            with (
+                mock.patch.object(benchmark, "Console", FakeConsole),
+                mock.patch.object(benchmark, "Table", FakeTable),
+                mock.patch.object(benchmark, "box", fake_box),
+            ):
+                exit_code = benchmark.cmd_list(tasks, root)
 
         self.assertEqual(exit_code, 0)
         console = FakeConsole.instances[0]
         self.assertEqual(console.kwargs["width"], 120)
         table = console.print_calls[0]
-        self.assertEqual([name for name, _ in table.columns], ["Repo", "Issue", "Task", "Title"])
+        self.assertEqual([name for name, _ in table.columns], ["Repo", "Issue", "Task", "Runs", "Title"])
         self.assertEqual(
             table.rows,
             [
@@ -267,7 +454,124 @@ class BenchmarkHarnessTests(unittest.TestCase):
                     "example/project",
                     "[link=https://github.com/example/project/issues/42]#42[/link]",
                     "demo-task",
+                    "prepared",
                     "Add example feature",
+                )
+            ],
+        )
+
+    def test_cmd_judge_reuses_existing_managed_eval(self) -> None:
+        tasks = {"demo-task": self.task}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            eval_dir = benchmark.evaluation_dir(root, "demo-task", "codex", "20260310T150000Z")
+            eval_dir.mkdir(parents=True)
+            judge_workspace = benchmark.judge_workspace_dir(eval_dir)
+            (judge_workspace / "A_repo").mkdir(parents=True)
+            (judge_workspace / "B_repo").mkdir(parents=True)
+            (judge_workspace / "accepted_pr_repo").mkdir(parents=True)
+            benchmark.write_json(eval_dir / "blind_manifest.json", self.example_blind_manifest())
+            (eval_dir / "control.diff").write_text("control diff")
+            (eval_dir / "tg.diff").write_text("tg diff")
+            (eval_dir / "ground_truth.diff").write_text("ground truth diff")
+            (eval_dir / "control_files.json").write_text('{"files":[]}')
+            (eval_dir / "tg_files.json").write_text('{"files":[]}')
+            (eval_dir / "ground_truth_files.json").write_text('{"files":[]}')
+            (judge_workspace / "A.diff").write_text("A diff")
+            (judge_workspace / "B.diff").write_text("B diff")
+            (judge_workspace / "accepted_pr.diff").write_text("accepted diff")
+            (judge_workspace / "A_files.json").write_text('{"files":[]}')
+            (judge_workspace / "B_files.json").write_text('{"files":[]}')
+            (judge_workspace / "accepted_pr_files.json").write_text('{"files":[]}')
+            (eval_dir / "judge_prompt.md").write_text("stale prompt")
+            with (
+                mock.patch.object(benchmark, "initialize_eval_run") as init_mock,
+                mock.patch.object(benchmark, "write_blind_judge_artifacts") as blind_mock,
+                mock.patch.object(benchmark, "run_judge_agent", return_value=self.example_judgment()) as judge_mock,
+                mock.patch.object(benchmark, "render_report_for_eval", return_value=Path("/tmp/report.md")),
+            ):
+                exit_code = benchmark.cmd_judge(
+                    tasks,
+                    "demo-task",
+                    root,
+                    evaluated_agent="codex",
+                    judge_agent="claude",
+                    judge_model=None,
+                    eval_id="20260310T150000Z",
+                    prepare=False,
+                    force=False,
+                )
+
+            judgment = benchmark.load_json(eval_dir / "judgment.json")
+            refreshed_prompt = (eval_dir / "judge_prompt.md").read_text()
+
+        self.assertEqual(exit_code, 0)
+        init_mock.assert_not_called()
+        blind_mock.assert_called_once()
+        self.assertEqual(judgment["judge_agent"], "claude")
+        self.assertNotEqual(refreshed_prompt, "stale prompt")
+        self.assertEqual(judge_mock.call_args.kwargs["cwd"], eval_dir)
+
+    def test_cmd_runs_prints_rich_table_when_available(self) -> None:
+        tasks = {"demo-task": self.task}
+
+        class FakeTable:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+                self.columns: list[tuple[str, dict[str, object]]] = []
+                self.rows: list[tuple[str, ...]] = []
+
+            def add_column(self, name: str, **kwargs: object) -> None:
+                self.columns.append((name, kwargs))
+
+            def add_row(self, *values: str) -> None:
+                self.rows.append(values)
+
+        class FakeConsole:
+            instances: list["FakeConsole"] = []
+
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+                self.print_calls: list[FakeTable] = []
+                FakeConsole.instances.append(self)
+
+            def print(self, table: FakeTable) -> None:
+                self.print_calls.append(table)
+
+        fake_box = mock.Mock(SIMPLE_HEAVY="simple-heavy")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            eval_dir = benchmark.evaluation_dir(root, "demo-task", "codex", "20260310T140000Z")
+            eval_dir.mkdir(parents=True)
+            (eval_dir / "control.diff").write_text("diff")
+            (eval_dir / "tg.diff").write_text("diff")
+            benchmark.write_json(eval_dir / "judgment.json", self.example_judgment())
+            with (
+                mock.patch.object(benchmark, "Console", FakeConsole),
+                mock.patch.object(benchmark, "Table", FakeTable),
+                mock.patch.object(benchmark, "box", fake_box),
+            ):
+                exit_code = benchmark.cmd_runs(tasks, root)
+
+        self.assertEqual(exit_code, 0)
+        console = FakeConsole.instances[0]
+        self.assertEqual(console.kwargs["width"], 140)
+        table = console.print_calls[0]
+        self.assertEqual(
+            [name for name, _ in table.columns],
+            ["Repo", "Task", "Agent", "Run ID", "Control", "TG", "Status"],
+        )
+        self.assertEqual(
+            table.rows,
+            [
+                (
+                    "example/project",
+                    "demo-task",
+                    "codex",
+                    "20260310T140000Z",
+                    "snapshotted",
+                    "snapshotted",
+                    "judged",
                 )
             ],
         )
@@ -289,6 +593,7 @@ class BenchmarkHarnessTests(unittest.TestCase):
 
         self.assertEqual(result, expected)
         self.assertEqual(run_mock.call_args.args[0][-2:], ["--model", "sonnet"])
+        self.assertNotIn("--tools", run_mock.call_args.args[0])
         self.assertNotIn(prompt, run_mock.call_args.args[0])
         self.assertEqual(run_mock.call_args.kwargs["input_text"], prompt)
 
@@ -343,6 +648,23 @@ class BenchmarkCliSmokeTests(unittest.TestCase):
         self.assertIn("run-task", result.stdout)
         self.assertIn("--agent-model", result.stdout)
         self.assertIn("--judge-model", result.stdout)
+
+    def test_runs_help(self) -> None:
+        result = self.run_help("runs")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("runs", result.stdout)
+
+    def test_main_defaults_to_runs(self) -> None:
+        tasks = {"demo-task": {"id": "demo-task"}}
+        with (
+            mock.patch.object(benchmark, "load_tasks", return_value=tasks),
+            mock.patch.object(benchmark, "cmd_runs", return_value=0) as cmd_runs_mock,
+            mock.patch.object(sys, "argv", ["benchmark.py"]),
+        ):
+            exit_code = benchmark.main()
+
+        self.assertEqual(exit_code, 0)
+        cmd_runs_mock.assert_called_once_with(tasks, benchmark.DEFAULT_ROOT)
 
 
 if __name__ == "__main__":

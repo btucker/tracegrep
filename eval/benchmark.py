@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 from datetime import datetime, timezone
@@ -40,6 +42,7 @@ SUPPORTED_CONDITIONS = ("control", "tg")
 TRACEGREP_SKILL_SOURCE = SCRIPT_DIR.parent / "skills" / "tracegrep"
 BENCHMARK_EXPORT_NAME = "tracegrep-eval"
 BENCHMARK_EXPORT_EMAIL = "tracegrep-eval@example.com"
+WORKTREE_SNAPSHOT_EXCLUDES = (".codex", ".claude", ".eval-bin", ".tracegrep-cache")
 
 JUDGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -47,6 +50,7 @@ JUDGE_SCHEMA: dict[str, Any] = {
     "required": [
         "better_matches_pr",
         "better_overall",
+        "overall_ranking",
         "confidence",
         "scores",
         "A_vs_pr_differences",
@@ -59,6 +63,13 @@ JUDGE_SCHEMA: dict[str, Any] = {
     "properties": {
         "better_matches_pr": {"type": "string", "enum": ["A", "B", "tie"]},
         "better_overall": {"type": "string", "enum": ["A", "B", "tie"]},
+        "overall_ranking": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["A", "B", "accepted_pr"]},
+            "minItems": 3,
+            "maxItems": 3,
+            "uniqueItems": True,
+        },
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
         "scores": {
             "type": "object",
@@ -280,6 +291,23 @@ def load_json(path: Path) -> Any:
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
+
+
+def judge_workspace_dir(eval_dir: Path) -> Path:
+    return eval_dir / "judge_workspace"
+
+
+def export_commit_tree(repo_dir: Path, commit: str, target_dir: Path) -> None:
+    remove_tree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.run(
+        ["git", "archive", "--format=tar", commit],
+        cwd=repo_dir,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tar:
+        tar.extractall(target_dir)
 
 
 def host_tg_binary() -> Path:
@@ -514,27 +542,27 @@ def prepare_task(root: Path, task: dict[str, Any], *, force: bool) -> None:
             os.chmod(script_path, 0o755)
 
 
-def cmd_list(tasks: dict[str, dict[str, Any]]) -> int:
+def cmd_list(tasks: dict[str, dict[str, Any]], root: Path) -> int:
     if Console is None or Table is None or box is None:
-        print(render_plain_task_list(tasks), end="")
+        print(render_plain_task_list(tasks, root), end="")
         return 0
 
     console_kwargs: dict[str, Any] = {}
     if not sys.stdout.isatty():
         console_kwargs["width"] = 120
-    Console(**console_kwargs).print(build_task_table(tasks))
+    Console(**console_kwargs).print(build_task_table(tasks, root))
     return 0
 
 
-def render_plain_task_list(tasks: dict[str, dict[str, Any]]) -> str:
+def render_plain_task_list(tasks: dict[str, dict[str, Any]], root: Path) -> str:
     return "".join(
         f"{task['id']}: {task['repo']['name']} | "
-        f"{task['prompt']['title']} | issue #{task['issue']['number']}\n"
+        f"{task['prompt']['title']} | issue #{task['issue']['number']} | runs {describe_task_runs(root, task['id'])}\n"
         for task in tasks.values()
     )
 
 
-def build_task_table(tasks: dict[str, dict[str, Any]]) -> Table:
+def build_task_table(tasks: dict[str, dict[str, Any]], root: Path) -> Table:
     if Table is None or box is None:
         raise RuntimeError("rich is not available")
 
@@ -545,6 +573,7 @@ def build_task_table(tasks: dict[str, dict[str, Any]]) -> Table:
     table.add_column("Repo", no_wrap=True, style="green")
     table.add_column("Issue", justify="right", no_wrap=True, style="magenta")
     table.add_column("Task", no_wrap=True, style="cyan")
+    table.add_column("Runs", no_wrap=True, style="yellow")
     table.add_column("Title", overflow="fold")
 
     for task in tasks.values():
@@ -552,10 +581,204 @@ def build_task_table(tasks: dict[str, dict[str, Any]]) -> Table:
             task["repo"]["name"],
             f"[link={task['issue']['url']}]#{task['issue']['number']}[/link]",
             task["id"],
+            describe_task_runs(root, task["id"]),
             task["prompt"]["title"],
         )
 
     return table
+
+
+def describe_task_runs(root: Path, task_id: str) -> str:
+    base = run_dir(root, task_id)
+    if not base.exists():
+        return "-"
+
+    summaries: list[str] = []
+    for agent in SUPPORTED_AGENTS:
+        eval_root = evaluations_root(root, task_id, agent)
+        if not eval_root.exists():
+            continue
+        count = sum(1 for path in eval_root.iterdir() if path.is_dir())
+        if count:
+            summaries.append(f"{agent}:{count}")
+
+    if summaries:
+        return ", ".join(summaries)
+    return "prepared"
+
+
+def cmd_runs(tasks: dict[str, dict[str, Any]], root: Path) -> int:
+    records = collect_run_records(tasks, root)
+    if not records:
+        print(f"No evaluation runs found under {root / 'runs'}")
+        return 0
+
+    if Console is None or Table is None or box is None:
+        print(render_plain_run_list(records), end="")
+        return 0
+
+    console_kwargs: dict[str, Any] = {}
+    if not sys.stdout.isatty():
+        console_kwargs["width"] = 140
+    Console(**console_kwargs).print(build_runs_table(records))
+    return 0
+
+
+def collect_run_records(tasks: dict[str, dict[str, Any]], root: Path) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    runs_root = root / "runs"
+    if not runs_root.exists():
+        return records
+
+    for task_dir in sorted(path for path in runs_root.iterdir() if path.is_dir()):
+        evaluations_dir = task_dir / "evaluations"
+        if not evaluations_dir.exists():
+            continue
+        task = tasks.get(task_dir.name)
+        repo_name = task["repo"]["name"] if task else "-"
+        for agent_dir in sorted(path for path in evaluations_dir.iterdir() if path.is_dir()):
+            agent = agent_dir.name
+            for eval_dir in sorted((path for path in agent_dir.iterdir() if path.is_dir()), reverse=True):
+                control_status = describe_variant_status(eval_dir, "control")
+                tg_status = describe_variant_status(eval_dir, "tg")
+                records.append(
+                    {
+                        "repo": repo_name,
+                        "task": task_dir.name,
+                        "agent": agent,
+                        "run_id": eval_dir.name,
+                        "control": control_status,
+                        "tg": tg_status,
+                        "status": describe_run_status(eval_dir, control_status, tg_status),
+                    }
+                )
+
+    records.sort(key=lambda record: (record["run_id"], record["task"], record["agent"]), reverse=True)
+    return records
+
+
+def load_publish_meta(eval_dir: Path) -> dict[str, Any] | None:
+    path = eval_dir / "publish.json"
+    if not path.exists():
+        return None
+    return load_json(path)
+
+
+def describe_variant_status(eval_dir: Path, condition: str) -> str:
+    publish_meta = load_publish_meta(eval_dir)
+    if publish_meta and publish_meta.get("published"):
+        branch_meta = publish_meta.get("branches", {}).get(condition)
+        if isinstance(branch_meta, dict) and branch_meta.get("url"):
+            return "published"
+
+    if (eval_dir / f"{condition}.diff").exists() or (eval_dir / f"{condition}_files.json").exists():
+        return "snapshotted"
+    return "-"
+
+
+def describe_run_status(eval_dir: Path, control_status: str, tg_status: str) -> str:
+    publish_meta = load_publish_meta(eval_dir)
+    if publish_meta and publish_meta.get("published"):
+        return "published"
+    if (eval_dir / "judgment.json").exists():
+        return "judged"
+    if control_status != "-" or tg_status != "-":
+        return "snapshotted"
+    return "created"
+
+
+def render_plain_run_list(records: list[dict[str, str]]) -> str:
+    return "".join(
+        f"{record['repo']} | {record['task']} | {record['agent']} | {record['run_id']} | "
+        f"control {record['control']} | tg {record['tg']} | {record['status']}\n"
+        for record in records
+    )
+
+
+def build_runs_table(records: list[dict[str, str]]) -> Table:
+    if Table is None or box is None:
+        raise RuntimeError("rich is not available")
+
+    table = Table(
+        box=box.SIMPLE_HEAVY,
+        header_style="bold",
+    )
+    table.add_column("Repo", no_wrap=True, style="green")
+    table.add_column("Task", no_wrap=True, style="cyan")
+    table.add_column("Agent", no_wrap=True, style="blue")
+    table.add_column("Run ID", no_wrap=True, style="yellow")
+    table.add_column("Control", no_wrap=True)
+    table.add_column("TG", no_wrap=True)
+    table.add_column("Status", no_wrap=True, style="magenta")
+
+    for record in records:
+        table.add_row(
+            record["repo"],
+            record["task"],
+            record["agent"],
+            record["run_id"],
+            record["control"],
+            record["tg"],
+            record["status"],
+        )
+
+    return table
+
+
+def initialize_eval_run(
+    *,
+    task: dict[str, Any],
+    root: Path,
+    evaluated_agent: str,
+    eval_dir: Path,
+    eval_id: str,
+) -> dict[str, Any]:
+    snapshot_commits, _ = write_diff_artifacts(
+        task=task,
+        root=root,
+        evaluated_agent=evaluated_agent,
+        eval_dir=eval_dir,
+    )
+    blind_manifest = build_blind_manifest(
+        task_id=task["id"],
+        evaluated_agent=evaluated_agent,
+        eval_id=eval_id,
+        snapshot_commits=snapshot_commits,
+    )
+    write_json(eval_dir / "blind_manifest.json", blind_manifest)
+    write_blind_judge_artifacts(task=task, root=root, blind_manifest=blind_manifest, eval_dir=eval_dir)
+    judge_input = build_judge_input(task, blind_manifest, eval_dir)
+    write_json(eval_dir / "judge_input.json", judge_input)
+    prompt = build_judge_prompt(judge_input)
+    write_text(eval_dir / "judge_prompt.md", prompt)
+    write_json(
+        eval_dir / "publish.json",
+        {
+            "published": False,
+            "warning": "Public branch publishing can contaminate future benchmarks. Publish only after evaluation is complete.",
+        },
+    )
+    return {
+        "blind_manifest": blind_manifest,
+        "judge_input": judge_input,
+        "prompt": prompt,
+    }
+
+
+def ensure_existing_eval_can_be_judged(eval_dir: Path) -> dict[str, Any]:
+    if (eval_dir / "judgment.json").exists():
+        raise SystemExit(f"Evaluation {eval_dir.name} already has judgment.json")
+    blind_manifest_path = eval_dir / "blind_manifest.json"
+    if not blind_manifest_path.exists():
+        raise SystemExit(
+            f"Evaluation {eval_dir.name} is missing blind_manifest.json. "
+            "Only managed evaluation directories can be judged."
+        )
+    return {
+        "blind_manifest": load_json(blind_manifest_path),
+        "judge_input": load_json(eval_dir / "judge_input.json") if (eval_dir / "judge_input.json").exists() else None,
+        "prompt": (eval_dir / "judge_prompt.md").read_text() if (eval_dir / "judge_prompt.md").exists() else None,
+    }
 
 
 def cmd_show(tasks: dict[str, dict[str, Any]], task_id: str) -> int:
@@ -707,6 +930,8 @@ def snapshot_worktree_commit(worktree: Path, base_commit: str, message: str) -> 
         env = benchmark_git_env(index_path)
         run(["git", "read-tree", base_commit], cwd=worktree, env=env)
         run(["git", "add", "-A", "."], cwd=worktree, env=env)
+        for excluded in WORKTREE_SNAPSHOT_EXCLUDES:
+            run(["git", "reset", "-q", "--", excluded], cwd=worktree, env=env, check=False)
         tree = run(["git", "write-tree"], cwd=worktree, env=env, capture_output=True).stdout.strip()
         commit = run(
             ["git", "commit-tree", tree, "-p", base_commit, "-m", message],
@@ -818,31 +1043,59 @@ def write_diff_artifacts(
     return snapshot_commits, summaries
 
 
+def write_blind_judge_artifacts(
+    *,
+    task: dict[str, Any],
+    root: Path,
+    blind_manifest: dict[str, Any],
+    eval_dir: Path,
+) -> None:
+    workspace = judge_workspace_dir(eval_dir)
+    remove_tree(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    cache_dir = cache_repo_dir(root, task)
+    if not cache_dir.exists():
+        cache_dir = ensure_repo_cache(root, task)
+
+    for label in ("A", "B"):
+        condition = blind_manifest["label_to_condition"][label]
+        write_text(workspace / f"{label}.diff", (eval_dir / f"{condition}.diff").read_text())
+        write_json(workspace / f"{label}_files.json", load_json(eval_dir / f"{condition}_files.json"))
+        export_commit_tree(cache_dir, blind_manifest["snapshot_commits"][condition], workspace / f"{label}_repo")
+
+    write_text(workspace / "accepted_pr.diff", (eval_dir / "ground_truth.diff").read_text())
+    write_json(workspace / "accepted_pr_files.json", load_json(eval_dir / "ground_truth_files.json"))
+    export_commit_tree(cache_dir, task["ground_truth"]["merge_commit"], workspace / "accepted_pr_repo")
+
+
 def build_judge_input(
     task: dict[str, Any],
     blind_manifest: dict[str, Any],
     eval_dir: Path,
 ) -> dict[str, Any]:
-    label_to_condition = blind_manifest["label_to_condition"]
+    workspace = judge_workspace_dir(eval_dir)
     implementations = {}
     for label in ("A", "B"):
-        condition = label_to_condition[label]
         implementations[label] = {
-            "diff_path": f"{condition}.diff",
-            "diff": (eval_dir / f"{condition}.diff").read_text(),
-            "files": load_json(eval_dir / f"{condition}_files.json"),
+            "diff_path": str((workspace / f"{label}.diff").relative_to(eval_dir)),
+            "repo_path": str((workspace / f"{label}_repo").relative_to(eval_dir)),
+            "files_path": str((workspace / f"{label}_files.json").relative_to(eval_dir)),
+            "files": load_json(workspace / f"{label}_files.json"),
         }
     return {
         "task_id": task["id"],
+        "evaluated_agent": blind_manifest["evaluated_agent"],
+        "eval_id": blind_manifest["eval_id"],
         "repo": task["repo"],
         "issue": task["issue"],
         "prompt": task["prompt"],
         "evaluation_focus": task["evaluation_focus"],
         "ground_truth": {
             **task["ground_truth"],
-            "diff_path": "ground_truth.diff",
-            "diff": (eval_dir / "ground_truth.diff").read_text(),
-            "files": load_json(eval_dir / "ground_truth_files.json"),
+            "diff_path": str((workspace / "accepted_pr.diff").relative_to(eval_dir)),
+            "repo_path": str((workspace / "accepted_pr_repo").relative_to(eval_dir)),
+            "files_path": str((workspace / "accepted_pr_files.json").relative_to(eval_dir)),
+            "files": load_json(workspace / "accepted_pr_files.json"),
         },
         "implementations": implementations,
     }
@@ -851,16 +1104,18 @@ def build_judge_input(
 def build_judge_prompt(judge_input: dict[str, Any]) -> str:
     return textwrap.dedent(
         f"""\
-        You are evaluating two candidate implementations for a historical benchmark task.
+        You are evaluating a three-way comparison for a historical benchmark task.
 
         The judge must stay blind to which implementation came from the control condition and which came from the tracegrep condition.
 
         Your job:
-        - Compare Implementation A and Implementation B against the accepted human PR diff.
+        - Compare Implementation A, Implementation B, and the accepted human PR as three candidate solutions to the same task.
+        - Use the three parent-to-solution diffs as the primary evidence and identify nuanced differences on your own.
         - Decide which implementation better matches the accepted PR.
         - Decide which implementation appears better on its own merits.
+        - Rank `A`, `B`, and `accepted_pr` from strongest to weakest on overall technical merits.
         - Focus on architectural fit, reuse of existing patterns, duplication risk, and test alignment.
-        - Explain how each implementation differs from the accepted PR.
+        - Explain how A differs from the accepted PR, how B differs from the accepted PR, and how A and B differ from each other.
         - Output only JSON matching the provided schema.
 
         Task metadata:
@@ -875,6 +1130,19 @@ def build_judge_prompt(judge_input: dict[str, Any]) -> str:
         Evaluation focus:
         {json.dumps(judge_input['evaluation_focus'], indent=2)}
 
+        Available judge artifacts:
+        - `{judge_input['implementations']['A']['diff_path']}` is the parent -> Implementation A diff.
+        - `{judge_input['implementations']['B']['diff_path']}` is the parent -> Implementation B diff.
+        - `{judge_input['ground_truth']['diff_path']}` is the parent -> accepted human PR diff.
+        - `{judge_input['implementations']['A']['repo_path']}` is a sanitized export of Implementation A's resulting repo tree.
+        - `{judge_input['implementations']['B']['repo_path']}` is a sanitized export of Implementation B's resulting repo tree.
+        - `{judge_input['ground_truth']['repo_path']}` is a sanitized export of the accepted PR's resulting repo tree.
+
+        Tooling guidance:
+        - You may inspect the diff files and exported repo trees with tools to understand repo context and implementation details.
+        - Do not modify files; this is a read-only evaluation task.
+        - Stay blind to which implementation label maps to `control` vs `tg`; use only the blinded artifact labels and paths above.
+
         Changed-file summary for Implementation A:
         {json.dumps(judge_input['implementations']['A']['files'], indent=2)}
 
@@ -883,21 +1151,6 @@ def build_judge_prompt(judge_input: dict[str, Any]) -> str:
 
         Changed-file summary for the accepted PR:
         {json.dumps(judge_input['ground_truth']['files'], indent=2)}
-
-        Implementation A diff:
-        ```diff
-        {judge_input['implementations']['A']['diff']}
-        ```
-
-        Implementation B diff:
-        ```diff
-        {judge_input['implementations']['B']['diff']}
-        ```
-
-        Accepted human PR diff:
-        ```diff
-        {judge_input['ground_truth']['diff']}
-        ```
         """
     ).strip() + "\n"
 
@@ -919,7 +1172,7 @@ def unwrap_possible_json_payload(payload: Any) -> Any:
     if isinstance(payload, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(payload):
         return payload
     if isinstance(payload, dict):
-        for key in ("result", "content", "output", "message", "final", "final_message"):
+        for key in ("structured_output", "result", "content", "output", "message", "final", "final_message"):
             if key not in payload:
                 continue
             value = payload[key]
@@ -963,6 +1216,7 @@ def validate_judgment(payload: dict[str, Any]) -> None:
     required_top = {
         "better_matches_pr",
         "better_overall",
+        "overall_ranking",
         "confidence",
         "scores",
         "A_vs_pr_differences",
@@ -979,6 +1233,9 @@ def validate_judgment(payload: dict[str, Any]) -> None:
         raise ValueError("better_matches_pr must be A, B, or tie")
     if payload["better_overall"] not in {"A", "B", "tie"}:
         raise ValueError("better_overall must be A, B, or tie")
+    ranking = payload["overall_ranking"]
+    if not isinstance(ranking, list) or sorted(ranking) != ["A", "B", "accepted_pr"]:
+        raise ValueError("overall_ranking must contain A, B, and accepted_pr exactly once")
     if payload["confidence"] not in {"low", "medium", "high"}:
         raise ValueError("confidence must be low, medium, or high")
     for label in ("A", "B"):
@@ -1013,8 +1270,6 @@ def run_judge_claude(prompt: str, *, cwd: Path, judge_model: str | None) -> dict
         json.dumps(JUDGE_SCHEMA),
         "--permission-mode",
         "default",
-        "--tools",
-        "",
     ]
     if judge_model:
         command.extend(["--model", judge_model])
@@ -1095,6 +1350,24 @@ def reveal_winner(label: str, blind_manifest: dict[str, Any]) -> str:
     return blind_manifest["label_to_condition"][label]
 
 
+def reveal_ranking_item(label: str, blind_manifest: dict[str, Any]) -> str:
+    if label == "accepted_pr":
+        return "accepted_pr"
+    return reveal_winner(label, blind_manifest)
+
+
+def overall_ranking_labels(judgment: dict[str, Any]) -> list[str]:
+    ranking = judgment.get("overall_ranking")
+    if isinstance(ranking, list) and sorted(ranking) == ["A", "B", "accepted_pr"]:
+        return ranking
+    winner = judgment.get("better_overall")
+    if winner == "A":
+        return ["accepted_pr", "A", "B"]
+    if winner == "B":
+        return ["accepted_pr", "B", "A"]
+    return ["accepted_pr", "A", "B"]
+
+
 def condition_scores(judgment: dict[str, Any], blind_manifest: dict[str, Any]) -> dict[str, dict[str, int]]:
     label_for = blind_manifest["condition_to_label"]
     return {
@@ -1152,6 +1425,9 @@ def build_report_markdown(
     risks = condition_nested_list(judgment, blind_manifest, "notable_risks")
     overall_winner = reveal_winner(judgment["better_overall"], blind_manifest)
     pr_winner = reveal_winner(judgment["better_matches_pr"], blind_manifest)
+    overall_ranking = " > ".join(
+        f"`{reveal_ranking_item(label, blind_manifest)}`" for label in overall_ranking_labels(judgment)
+    )
     control_vs_tg = judgment["A_vs_B_differences"]
     link_section = [
         "Publishing has not been run yet for this evaluation.",
@@ -1209,6 +1485,7 @@ def build_report_markdown(
         ## Blind Verdict Summary
         - Better matches the accepted PR: `{pr_winner}`
         - Better overall: `{overall_winner}`
+        - Overall ranking: {overall_ranking}
         - Judge confidence: `{judgment['confidence']}`
 
         ## Blind Mapping
@@ -1368,37 +1645,28 @@ def cmd_judge(
     eval_id_value = eval_id or new_eval_id()
     eval_path = evaluation_dir(root, task_id, evaluated_agent, eval_id_value)
     if eval_path.exists():
-        raise SystemExit(f"Evaluation {eval_id_value} already exists at {eval_path}")
-    eval_path.mkdir(parents=True, exist_ok=False)
-    snapshot_commits, _ = write_diff_artifacts(
-        task=task,
-        root=root,
-        evaluated_agent=evaluated_agent,
-        eval_dir=eval_path,
-    )
-    blind_manifest = build_blind_manifest(
-        task_id=task_id,
-        evaluated_agent=evaluated_agent,
-        eval_id=eval_id_value,
-        snapshot_commits=snapshot_commits,
-    )
-    write_json(eval_path / "blind_manifest.json", blind_manifest)
-    judge_input = build_judge_input(task, blind_manifest, eval_path)
-    write_json(eval_path / "judge_input.json", judge_input)
-    prompt = build_judge_prompt(judge_input)
-    write_text(eval_path / "judge_prompt.md", prompt)
+        existing = ensure_existing_eval_can_be_judged(eval_path)
+        blind_manifest = existing["blind_manifest"]
+        write_blind_judge_artifacts(task=task, root=root, blind_manifest=blind_manifest, eval_dir=eval_path)
+        judge_input = build_judge_input(task, blind_manifest, eval_path)
+        write_json(eval_path / "judge_input.json", judge_input)
+        prompt = build_judge_prompt(judge_input)
+        write_text(eval_path / "judge_prompt.md", prompt)
+    else:
+        eval_path.mkdir(parents=True, exist_ok=False)
+        initialized = initialize_eval_run(
+            task=task,
+            root=root,
+            evaluated_agent=evaluated_agent,
+            eval_dir=eval_path,
+            eval_id=eval_id_value,
+        )
+        prompt = initialized["prompt"]
     judgment = run_judge_agent(judge_agent, prompt, cwd=eval_path, judge_model=judge_model)
     judgment["judge_agent"] = judge_agent
     if judge_model is not None:
         judgment["judge_model"] = judge_model
     write_json(eval_path / "judgment.json", judgment)
-    write_json(
-        eval_path / "publish.json",
-        {
-            "published": False,
-            "warning": "Public branch publishing can contaminate future benchmarks. Publish only after evaluation is complete.",
-        },
-    )
     report_path = render_report_for_eval(
         task=task,
         evaluated_agent=evaluated_agent,
@@ -1721,9 +1989,13 @@ def cmd_run_task(
 
 def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Historical benchmark harness for codex/claude CLI.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("list", help="List available benchmark tasks.")
+    runs_parser = subparsers.add_parser("runs", help="List evaluation runs and their state.")
+    runs_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+
+    list_parser = subparsers.add_parser("list", help="List available benchmark tasks.")
+    list_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
 
     show_parser = subparsers.add_parser("show", help="Show details for one task.")
     show_parser.add_argument("task_id", choices=task_ids)
@@ -1806,8 +2078,13 @@ def main() -> int:
     parser = build_parser(sorted(tasks))
     args, extra_args = parser.parse_known_args()
 
+    if args.command is None:
+        return cmd_runs(tasks, DEFAULT_ROOT)
+    if args.command == "runs":
+        return cmd_runs(tasks, args.root)
+
     if args.command == "list":
-        return cmd_list(tasks)
+        return cmd_list(tasks, args.root)
     if args.command == "show":
         return cmd_show(tasks, args.task_id)
     if args.command == "prepare":

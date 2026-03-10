@@ -21,6 +21,13 @@ The claim this harness is built to test is:
 
 ## Usage
 
+List evaluation runs and their current state:
+
+```bash
+uv run eval/benchmark.py
+uv run eval/benchmark.py runs
+```
+
 List tasks:
 
 ```bash
@@ -110,8 +117,21 @@ Judging a task creates:
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/ground_truth.diff`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/blind_manifest.json`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_input.json`
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/A.diff`
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/B.diff`
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/accepted_pr.diff`
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/A_repo/`
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/B_repo/`
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/accepted_pr_repo/`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judgment.json`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/publish.json`
+
+The default `runs` view shows one row per `evaluations/<agent>/<eval-id>/` directory, including:
+
+- the task and agent
+- the `eval-id` run id
+- per-variant state for `control` and `tg`
+- an overall run status
 
 Rendering reports writes repo-tracked markdown artifacts:
 
@@ -142,6 +162,8 @@ For the `tg` worktree only, `prepare` also creates:
 - The `control` worktree does not get the Codex skill or Claude plugin config.
 - For tasks where the original issue contained solution leakage, the manifest uses a redacted benchmark prompt instead.
 - The judge stays blind to which side is `control` vs `tg`; that mapping is only revealed in the final markdown report.
+- The judge compares three parent-based diffs: parent -> A, parent -> B, and parent -> accepted PR.
+- The judge gets tool access, but only through blinded `judge_workspace/` artifacts and sanitized repo exports, not the live `control/` or `tg` worktrees.
 - The default judge agent comes from `TRACEGREP_EVAL_JUDGE_AGENT` and falls back to `claude`.
 - `publish` uses `gh` to detect or create forks under `btucker`, then pushes both branches with opaque benchmark branch names.
 - Public publishing can leak benchmark solutions into future search. Treat published branches as post-hoc artifacts, not inputs to new runs.
