@@ -2,12 +2,60 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "tracegrep",
+    version,
+    about = "Search code with ripgrep and language-aware call graph context.",
+    disable_help_subcommand = true,
+    trailing_var_arg = true,
+    override_usage = "tracegrep [OPTIONS/rg flags] <pattern> [path ...]\n       tracegrep --build-index [path ...]\n       tracegrep --generate <TARGET>\n       tracegrep --install-completions [SHELL]",
+    after_help = "Any unrecognized flags before <pattern> are forwarded to rg.\nPositional [path ...] arguments use rg semantics."
+)]
+struct RawCli {
+    /// Build or refresh the cached call graph index, then exit.
+    #[arg(long)]
+    build_index: bool,
+    /// Generate shell completions: complete-bash, complete-zsh, or complete-fish.
+    #[arg(long)]
+    generate: Option<String>,
+    /// Install shell completions for the current or given shell.
+    #[arg(long, num_args = 0..=1, default_missing_value = "auto")]
+    install_completions: Option<String>,
+    /// Output enriched results as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Collapse human-readable context onto the location line.
+    #[arg(long)]
+    compact: bool,
+    /// Include test-file callers and references in the graph.
+    #[arg(long)]
+    include_tests: bool,
+    /// Show callers that originate from test code.
+    #[arg(long)]
+    include_test_callers: bool,
+    /// How many caller levels to show.
+    #[arg(long, default_value_t = 1)]
+    depth: usize,
+    /// Max callers or references to show per section.
+    #[arg(long, default_value_t = 5)]
+    max_context: usize,
+    #[arg(allow_hyphen_values = true, value_name = "ARG")]
+    raw_args: Vec<String>,
+}
+
 pub struct Cli {
+    pub build_index: bool,
+    pub generate: Option<String>,
+    pub install_completions: Option<String>,
     pub json: bool,
     pub compact: bool,
     pub repo: String,
     pub search_paths: Vec<String>,
     pub depth: usize,
+    pub max_context: usize,
     pub include_tests: bool,
     pub include_test_callers: bool,
     pub pattern: String,
@@ -16,90 +64,84 @@ pub struct Cli {
 
 impl Cli {
     pub fn parse() -> anyhow::Result<Self> {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-
-        if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-            print!("{}", Self::help_text());
-            std::process::exit(0);
-        }
-        if args.iter().any(|arg| arg == "-V" || arg == "--version") {
-            println!("{}", env!("CARGO_PKG_VERSION"));
-            std::process::exit(0);
-        }
-        if args.is_empty() {
-            anyhow::bail!("{}", Self::help_text());
-        }
+        let original_args: Vec<String> = std::env::args().collect();
+        let allow_dash_pattern = original_args.iter().any(|arg| arg == "--");
+        let raw = RawCli::parse();
 
         let mut cli = Cli {
-            json: false,
-            compact: false,
+            build_index: raw.build_index,
+            generate: raw.generate,
+            install_completions: raw.install_completions,
+            json: raw.json,
+            compact: raw.compact,
             repo: ".".to_string(),
             search_paths: Vec::new(),
-            depth: 1,
-            include_tests: false,
-            include_test_callers: false,
+            depth: raw.depth,
+            max_context: raw.max_context,
+            include_tests: raw.include_tests,
+            include_test_callers: raw.include_test_callers,
             pattern: String::new(),
             rg_args: Vec::new(),
         };
 
-        let mut passthrough = Vec::new();
-        let mut after_delimiter = false;
-        let mut idx = 0;
-        while idx < args.len() {
-            if !after_delimiter {
-                match args[idx].as_str() {
-                    "--" => {
-                        after_delimiter = true;
-                        idx += 1;
-                        continue;
-                    }
-                    "--json" => {
-                        cli.json = true;
-                        idx += 1;
-                        continue;
-                    }
-                    "--compact" => {
-                        cli.compact = true;
-                        idx += 1;
-                        continue;
-                    }
-                    "--include-tests" => {
-                        cli.include_tests = true;
-                        idx += 1;
-                        continue;
-                    }
-                    "--include-test-callers" => {
-                        cli.include_test_callers = true;
-                        idx += 1;
-                        continue;
-                    }
-                    "--depth" => {
-                        idx += 1;
-                        let value = args
-                            .get(idx)
-                            .ok_or_else(|| anyhow::anyhow!("missing value for --depth"))?;
-                        cli.depth = value
-                            .parse()
-                            .map_err(|_| anyhow::anyhow!("invalid value for --depth: {value}"))?;
-                        idx += 1;
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            passthrough.push(args[idx].clone());
-            idx += 1;
-        }
-
         if cli.json && cli.compact {
             anyhow::bail!("--compact cannot be used together with --json");
+        }
+        if cli.build_index && (cli.json || cli.compact || cli.include_test_callers) {
+            anyhow::bail!(
+                "--build-index cannot be used with --json, --compact, or --include-test-callers"
+            );
+        }
+        if cli.generate.is_some() && cli.install_completions.is_some() {
+            anyhow::bail!("--generate cannot be used together with --install-completions");
+        }
+
+        if cli.generate.is_some() {
+            if cli.json
+                || cli.compact
+                || cli.include_tests
+                || cli.include_test_callers
+                || cli.build_index
+                || !raw.raw_args.is_empty()
+            {
+                anyhow::bail!(
+                    "--generate cannot be combined with query flags or positional arguments"
+                );
+            }
+            return Ok(cli);
+        }
+
+        if cli.install_completions.is_some() {
+            if cli.json
+                || cli.compact
+                || cli.include_tests
+                || cli.include_test_callers
+                || cli.build_index
+                || !raw.raw_args.is_empty()
+            {
+                anyhow::bail!(
+                    "--install-completions cannot be combined with query flags or positional arguments"
+                );
+            }
+            return Ok(cli);
+        }
+
+        if cli.build_index {
+            if raw.raw_args.iter().any(|arg| arg.starts_with('-')) {
+                anyhow::bail!("--build-index accepts only optional path arguments");
+            }
+            if !raw.raw_args.is_empty() {
+                let (repo, _relative_paths) = infer_multi_path_repo_and_paths(&raw.raw_args)?;
+                cli.repo = repo;
+            }
+            return Ok(cli);
         }
 
         let ParsedPassthrough {
             pattern,
             search_paths,
             rg_args,
-        } = parse_passthrough(&passthrough, after_delimiter)?;
+        } = parse_passthrough(&raw.raw_args, allow_dash_pattern)?;
         cli.pattern = pattern;
         cli.rg_args = rg_args;
 
@@ -110,19 +152,6 @@ impl Cli {
         }
 
         Ok(cli)
-    }
-
-    fn help_text() -> String {
-        format!(
-            "tracegrep {}\n\n\
-Search code with ripgrep and language-aware call graph context.\n\n\
-Usage:\n  tracegrep [flags/rg flags] <pattern> [path ...]\n\n\
-Supported files: .rs, .py, .js, .jsx, .svelte, .ts, .tsx\n\n\
-Tracegrep flags:\n  --json                  Output enriched results as JSON\n  --compact               Collapse human-readable context onto the location line\n  --depth <N>             How many caller levels to show (default: 1)\n  --include-tests         Include test-file callers and references in the graph\n  --include-test-callers  Show callers that originate from test code\n  -h, --help              Print help\n  -V, --version           Print version\n\n\
-Any unrecognized flags before <pattern> are forwarded to rg.\n\
-Positional [path ...] arguments use rg semantics.\n",
-            env!("CARGO_PKG_VERSION")
-        )
     }
 }
 

@@ -1,11 +1,13 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use rayon::prelude::*;
 
 use super::parsing::module_name_from_path;
 use super::types::{
     CallGraph, FileArtifact, FnCalls, FnDef, GraphEdge, GraphNode, GraphReference, Language,
 };
 
-pub(super) type NameIndex = HashMap<(Language, String), Vec<usize>>;
+pub(super) type NameIndex = HashMap<Language, HashMap<String, Vec<usize>>>;
 
 #[derive(Debug, Clone)]
 pub(super) struct InternalEdge {
@@ -64,13 +66,7 @@ pub(super) fn build_call_graph(
     fn_defs: &[FnDef],
     fn_calls: &[FnCalls],
 ) -> HashMap<usize, Vec<InternalEdge>> {
-    let mut name_idx: NameIndex = HashMap::new();
-    for (i, def) in fn_defs.iter().enumerate() {
-        name_idx
-            .entry((def.language, def.name.clone()))
-            .or_default()
-            .push(i);
-    }
+    let name_idx = build_name_index(fn_defs);
 
     let mut graph: HashMap<usize, Vec<InternalEdge>> = HashMap::new();
 
@@ -167,32 +163,35 @@ pub(super) fn build_serializable_graph(
 }
 
 pub(super) fn build_references(fn_defs: &[FnDef], fn_calls: &[FnCalls]) -> Vec<GraphReference> {
-    let mut name_idx: NameIndex = HashMap::new();
-    for (i, def) in fn_defs.iter().enumerate() {
-        name_idx
-            .entry((def.language, def.name.clone()))
-            .or_default()
-            .push(i);
-    }
+    let name_idx = build_name_index(fn_defs);
 
-    let mut references = Vec::new();
-    for fc in fn_calls {
-        for site in &fc.reference_sites {
-            for target in resolve_symbol(
-                &site.target_name,
-                fn_defs,
-                &name_idx,
-                fn_defs[fc.caller_idx].language,
-            ) {
-                if target == fc.caller_idx {
-                    continue;
-                }
-                if !references.iter().any(|existing: &GraphReference| {
-                    existing.referencer == fc.caller_idx
-                        && existing.target == target
-                        && existing.kind == site.kind
-                        && existing.context == site.context
-                }) {
+    fn_calls
+        .par_iter()
+        .map(|fc| {
+            let mut seen = HashSet::new();
+            let mut references = Vec::new();
+
+            for site in &fc.reference_sites {
+                for target in resolve_symbol(
+                    &site.target_name,
+                    fn_defs,
+                    &name_idx,
+                    fn_defs[fc.caller_idx].language,
+                ) {
+                    if target == fc.caller_idx {
+                        continue;
+                    }
+
+                    let key = (
+                        fc.caller_idx,
+                        target,
+                        site.kind.clone(),
+                        site.context.clone(),
+                    );
+                    if !seen.insert(key) {
+                        continue;
+                    }
+
                     references.push(GraphReference {
                         referencer: fc.caller_idx,
                         target,
@@ -201,10 +200,13 @@ pub(super) fn build_references(fn_defs: &[FnDef], fn_calls: &[FnCalls]) -> Vec<G
                     });
                 }
             }
-        }
-    }
 
-    references
+            references
+        })
+        .reduce(Vec::new, |mut acc, mut references| {
+            acc.append(&mut references);
+            acc
+        })
 }
 
 pub(super) fn resolve_call(
@@ -236,7 +238,10 @@ fn resolve_symbol(
         qualifier = None;
     }
 
-    let candidates = match name_idx.get(&(language, simple_name.to_string())) {
+    let candidates = match name_idx
+        .get(&language)
+        .and_then(|names| names.get(simple_name))
+    {
         Some(candidates) => candidates,
         None => return Vec::new(),
     };
@@ -262,6 +267,19 @@ fn resolve_symbol(
     }
 
     candidates.clone()
+}
+
+fn build_name_index(fn_defs: &[FnDef]) -> NameIndex {
+    let mut name_idx = HashMap::new();
+    for (i, def) in fn_defs.iter().enumerate() {
+        name_idx
+            .entry(def.language)
+            .or_insert_with(HashMap::new)
+            .entry(def.name.clone())
+            .or_insert_with(Vec::new)
+            .push(i);
+    }
+    name_idx
 }
 
 pub fn merge_graphs(graphs: &[CallGraph]) -> CallGraph {

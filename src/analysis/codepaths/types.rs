@@ -78,7 +78,7 @@ pub struct GraphEdge {
     pub conditions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum GraphReferenceKind {
     Argument,
 }

@@ -1,67 +1,25 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use crate::analysis::codepaths::{CallGraph, GraphReferenceKind};
-use crate::graph_cache::load_or_build_graph;
+use crate::graph_cache::load_or_build_query_cache;
+use crate::timing::TimingCollector;
 
-struct FunctionIndex {
-    by_file: HashMap<String, Vec<(usize, usize, usize)>>,
-}
-
-impl FunctionIndex {
-    fn build(graph: &CallGraph) -> Self {
-        let mut by_file: HashMap<String, Vec<(usize, usize, usize)>> = HashMap::new();
-        for (i, node) in graph.nodes.iter().enumerate() {
-            if node.end_line == 0 {
-                continue;
-            }
-            let normalized = Self::normalize_path(&node.file).to_string();
-            by_file
-                .entry(normalized)
-                .or_default()
-                .push((node.line, node.end_line, i));
-        }
-        for intervals in by_file.values_mut() {
-            intervals.sort_by_key(|&(start, _, _)| start);
-        }
-        Self { by_file }
-    }
-
-    fn normalize_path(file: &str) -> &str {
-        file.strip_prefix("./").unwrap_or(file)
-    }
-
-    fn lookup(&self, file: &str, line: usize) -> Option<usize> {
-        let file = Self::normalize_path(file);
-        let intervals = self.by_file.get(file)?;
-        let pos = intervals.partition_point(|&(start, _, _)| start <= line);
-        if pos == 0 {
-            return None;
-        }
-        let (start, end, idx) = intervals[pos - 1];
-        if line >= start && line <= end {
-            return Some(idx);
-        }
-        for i in (0..pos.saturating_sub(1)).rev() {
-            let (start, end, idx) = intervals[i];
-            if line >= start && line <= end {
-                return Some(idx);
-            }
-        }
-        None
-    }
-}
-
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 struct CallerInfo {
     file: String,
     function: String,
     is_test: bool,
     line: usize,
     conditions: Vec<String>,
+    #[serde(skip_serializing)]
+    depth: usize,
+    #[serde(skip_serializing)]
+    heat: usize,
 }
 
 struct CallerSplit {
@@ -69,24 +27,20 @@ struct CallerSplit {
     test: Vec<CallerInfo>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 struct ReferenceInfo {
     file: String,
     function: String,
     is_test: bool,
     line: usize,
     context: Option<String>,
+    #[serde(skip_serializing)]
+    heat: usize,
 }
 
 struct ReferenceSplit {
     primary: Vec<ReferenceInfo>,
     test: Vec<ReferenceInfo>,
-}
-
-struct LoadedGraph {
-    graph: CallGraph,
-    backward_calls: Vec<Vec<usize>>,
-    backward_references: Vec<Vec<usize>>,
 }
 
 pub struct QueryOptions<'a> {
@@ -95,6 +49,7 @@ pub struct QueryOptions<'a> {
     pub repo: &'a str,
     pub search_paths: &'a [String],
     pub depth: usize,
+    pub max_context: usize,
     pub include_tests: bool,
     pub include_test_callers: bool,
     pub pattern: &'a str,
@@ -197,8 +152,8 @@ impl Colors {
         out
     }
 
-    fn format_location(&self, file: &str, function: &str, line: usize) -> String {
-        format!("{}:{}:{}", self.path(file), function, self.line(line))
+    fn format_location(&self, file: &str, function: &str) -> String {
+        format!("{}:{}", self.path(file), function)
     }
 
     fn format_caller(&self, caller: &CallerInfo) -> String {
@@ -258,6 +213,81 @@ struct MatchSpan {
     end: usize,
 }
 
+#[derive(Clone)]
+struct SnippetLine {
+    line_number: usize,
+    content: String,
+    is_match: bool,
+}
+
+struct RenderedBlock {
+    file: String,
+    location: String,
+    match_line_number: usize,
+    code_lines: Vec<SnippetLine>,
+    detail_lines: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+struct ContextSettings {
+    before: usize,
+    after: usize,
+}
+
+impl ContextSettings {
+    fn from_rg_args(rg_args: &[String]) -> Self {
+        let mut settings = Self {
+            before: 0,
+            after: 0,
+        };
+        let mut index = 0;
+        while index < rg_args.len() {
+            let arg = &rg_args[index];
+            let value = if arg == "-C" || arg == "-A" || arg == "-B" {
+                let parsed = rg_args
+                    .get(index + 1)
+                    .and_then(|value| value.parse::<usize>().ok());
+                index += 1;
+                parsed
+            } else if let Some(value) = arg.strip_prefix("--context=") {
+                value.parse::<usize>().ok()
+            } else if let Some(value) = arg.strip_prefix("--after-context=") {
+                value.parse::<usize>().ok()
+            } else if let Some(value) = arg.strip_prefix("--before-context=") {
+                value.parse::<usize>().ok()
+            } else if let Some(value) = arg.strip_prefix("-C") {
+                (!value.is_empty())
+                    .then(|| value.parse::<usize>().ok())
+                    .flatten()
+            } else if let Some(value) = arg.strip_prefix("-A") {
+                (!value.is_empty())
+                    .then(|| value.parse::<usize>().ok())
+                    .flatten()
+            } else if let Some(value) = arg.strip_prefix("-B") {
+                (!value.is_empty())
+                    .then(|| value.parse::<usize>().ok())
+                    .flatten()
+            } else {
+                None
+            };
+
+            if let Some(value) = value {
+                if arg.starts_with("-C") || arg.starts_with("--context=") {
+                    settings.before = value;
+                    settings.after = value;
+                } else if arg.starts_with("-A") || arg.starts_with("--after-context=") {
+                    settings.after = value;
+                } else if arg.starts_with("-B") || arg.starts_with("--before-context=") {
+                    settings.before = value;
+                }
+            }
+
+            index += 1;
+        }
+        settings
+    }
+}
+
 fn extract_submatches(data: &serde_json::Value) -> Vec<MatchSpan> {
     data.get("submatches")
         .and_then(|value| value.as_array())
@@ -275,6 +305,7 @@ fn extract_submatches(data: &serde_json::Value) -> Vec<MatchSpan> {
 fn collect_callers(
     graph: &CallGraph,
     backward_edges: &[Vec<usize>],
+    backward_refs: &[Vec<usize>],
     node_idx: usize,
     depth: usize,
 ) -> Vec<CallerInfo> {
@@ -283,7 +314,7 @@ fn collect_callers(
     let mut visited = HashSet::new();
     visited.insert(node_idx);
 
-    for _ in 0..depth {
+    for current_depth in 0..depth {
         let mut next_level = Vec::new();
         for &node_idx in &current_level {
             for &edge_idx in &backward_edges[node_idx] {
@@ -296,6 +327,8 @@ fn collect_callers(
                         is_test: node.is_test,
                         line: node.line,
                         conditions: edge.conditions.clone(),
+                        depth: current_depth + 1,
+                        heat: backward_edges[edge.caller].len() + backward_refs[edge.caller].len(),
                     });
                     next_level.push(edge.caller);
                 }
@@ -307,6 +340,14 @@ fn collect_callers(
         current_level = next_level;
     }
 
+    result.sort_by(|a, b| {
+        a.depth
+            .cmp(&b.depth)
+            .then_with(|| b.heat.cmp(&a.heat))
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.function.cmp(&b.function))
+    });
     result
 }
 
@@ -317,6 +358,7 @@ fn split_callers(callers: Vec<CallerInfo>) -> CallerSplit {
 
 fn collect_references(
     graph: &CallGraph,
+    backward_edges: &[Vec<usize>],
     backward_refs: &[Vec<usize>],
     node_idx: usize,
 ) -> Vec<ReferenceInfo> {
@@ -333,8 +375,17 @@ fn collect_references(
             is_test: node.is_test,
             line: node.line,
             context,
+            heat: backward_edges[reference.referencer].len()
+                + backward_refs[reference.referencer].len(),
         });
     }
+    result.sort_by(|a, b| {
+        b.heat
+            .cmp(&a.heat)
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.function.cmp(&b.function))
+    });
     result
 }
 
@@ -345,24 +396,24 @@ fn split_references(references: Vec<ReferenceInfo>) -> ReferenceSplit {
     ReferenceSplit { primary, test }
 }
 
-fn load_graph(repo_path: &Path, include_tests: bool) -> anyhow::Result<LoadedGraph> {
-    let graph = load_or_build_graph(repo_path, include_tests)?.graph;
-
-    let mut backward_calls = vec![vec![]; graph.nodes.len()];
-    for (i, edge) in graph.edges.iter().enumerate() {
-        backward_calls[edge.callee].push(i);
+fn truncate_context<T>(mut entries: Vec<T>, max: usize) -> (Vec<T>, usize) {
+    if entries.len() <= max {
+        return (entries, 0);
     }
+    let hidden = entries.len() - max;
+    entries.truncate(max);
+    (entries, hidden)
+}
 
-    let mut backward_references = vec![vec![]; graph.nodes.len()];
-    for (i, reference) in graph.references.iter().enumerate() {
-        backward_references[reference.target].push(i);
+fn summarize_hidden_context(label: &str, hidden: usize) -> Option<String> {
+    if hidden == 0 {
+        None
+    } else {
+        Some(format!(
+            "{hidden} more {label}{} hidden",
+            if hidden == 1 { "" } else { "s" }
+        ))
     }
-
-    Ok(LoadedGraph {
-        graph,
-        backward_calls,
-        backward_references,
-    })
 }
 
 fn summarize_hidden_test_callers(callers: &CallerSplit) -> Option<String> {
@@ -413,11 +464,19 @@ fn format_compact_section(colors: &Colors, label: &str, entries: &[String]) -> S
     out
 }
 
+struct HiddenContextCounts {
+    callers: usize,
+    test_callers: usize,
+    references: usize,
+    test_references: usize,
+}
+
 fn render_compact_sections(
     colors: &Colors,
     callers: &CallerSplit,
     references: &ReferenceSplit,
     include_test_callers: bool,
+    hidden: &HiddenContextCounts,
 ) -> Vec<String> {
     let mut sections = Vec::new();
 
@@ -442,7 +501,12 @@ fn render_compact_sections(
                 .map(|caller| colors.format_caller(caller))
                 .collect::<Vec<_>>(),
         ));
-    } else if let Some(summary) = summarize_hidden_test_callers(callers) {
+    } else if let Some(summary) = summarize_hidden_context("test caller", hidden.test_callers)
+        .or_else(|| summarize_hidden_test_callers(callers))
+    {
+        sections.push(format_compact_section(colors, &summary, &[]));
+    }
+    if let Some(summary) = summarize_hidden_context("caller", hidden.callers) {
         sections.push(format_compact_section(colors, &summary, &[]));
     }
 
@@ -456,18 +520,66 @@ fn render_compact_sections(
                 .map(|reference| colors.format_reference(reference))
                 .collect::<Vec<_>>(),
         ));
-    } else if let Some(summary) = summarize_hidden_test_references(references) {
+    } else if let Some(summary) = summarize_hidden_context("test reference", hidden.test_references)
+        .or_else(|| summarize_hidden_test_references(references))
+    {
+        sections.push(format_compact_section(colors, &summary, &[]));
+    }
+    if let Some(summary) = summarize_hidden_context("reference", hidden.references) {
         sections.push(format_compact_section(colors, &summary, &[]));
     }
 
     sections
 }
 
+fn render_snippet_line(colors: &Colors, line: &SnippetLine, width: usize) -> String {
+    let prefix = format!(
+        "{:>width$}{}",
+        line.line_number,
+        if line.is_match { ":" } else { "-" }
+    );
+    let styled_prefix = if line.is_match {
+        colors.line(prefix)
+    } else {
+        colors.dim_line(prefix)
+    };
+    let styled_content = if line.is_match {
+        line.content.clone()
+    } else {
+        colors.dim(&line.content)
+    };
+    format!("{styled_prefix}{styled_content}")
+}
+
+fn flush_block(block: &mut Option<RenderedBlock>, colors: &Colors, timings: &mut TimingCollector) {
+    let Some(block) = block.take() else {
+        return;
+    };
+    let output_started_at = Instant::now();
+    println!("{}", block.location);
+    let width = block
+        .code_lines
+        .iter()
+        .map(|line| line.line_number.to_string().len())
+        .max()
+        .unwrap_or(1);
+    for line in &block.code_lines {
+        println!("{}", render_snippet_line(colors, line, width));
+    }
+    for line in block.detail_lines {
+        println!("{line}");
+    }
+    println!();
+    timings.add("output", output_started_at.elapsed());
+}
+
 pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
     let repo_path = Path::new(options.repo).canonicalize()?;
+    let mut timings = TimingCollector::from_env();
     let colors = Colors::new(ColorChoice::from_rg_args(options.rg_args));
-    let loaded = load_graph(&repo_path, options.include_tests)?;
-    let fn_index = FunctionIndex::build(&loaded.graph);
+    let context = ContextSettings::from_rg_args(options.rg_args);
+    let loaded = load_or_build_query_cache(&repo_path, options.include_tests, &mut timings)?;
+    let rg_started_at = Instant::now();
 
     let mut rg_cmd = Command::new("rg");
     rg_cmd
@@ -491,6 +603,9 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
 
     let stdout = child.stdout.take().unwrap();
     let reader = BufReader::new(stdout);
+    let mut pending_context_lines: Vec<SnippetLine> = Vec::new();
+    let mut pending_context_file: Option<String> = None;
+    let mut current_block: Option<RenderedBlock> = None;
 
     for line in reader.lines() {
         let line = line?;
@@ -498,7 +613,58 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
             Ok(value) => value,
             Err(_) => continue,
         };
-        if parsed.get("type").and_then(|t| t.as_str()) != Some("match") {
+        let event_type = parsed.get("type").and_then(|t| t.as_str());
+        if event_type == Some("context") && !options.json_output {
+            let data = match parsed.get("data") {
+                Some(data) => data,
+                None => continue,
+            };
+            let file = match data
+                .get("path")
+                .and_then(|path| path.get("text"))
+                .and_then(|text| text.as_str())
+            {
+                Some(file) => file,
+                None => continue,
+            };
+            let line_number = match data.get("line_number").and_then(|n| n.as_u64()) {
+                Some(line_number) => line_number as usize,
+                None => continue,
+            };
+            let content = data
+                .get("lines")
+                .and_then(|lines| lines.get("text"))
+                .and_then(|text| text.as_str())
+                .unwrap_or("")
+                .trim_end_matches('\n');
+            if current_block
+                .as_ref()
+                .map(|block| block.file.as_str() != file)
+                .unwrap_or(false)
+            {
+                flush_block(&mut current_block, &colors, &mut timings);
+                pending_context_lines.clear();
+            }
+            if pending_context_file.as_deref() != Some(file) {
+                pending_context_lines.clear();
+                pending_context_file = Some(file.to_string());
+            }
+            let context_line = SnippetLine {
+                line_number,
+                content: content.to_string(),
+                is_match: false,
+            };
+            if let Some(block) = current_block.as_mut().filter(|block| block.file == file) {
+                if line_number > block.match_line_number
+                    && line_number <= block.match_line_number + context.after
+                {
+                    block.code_lines.push(context_line.clone());
+                }
+            }
+            pending_context_lines.push(context_line);
+            continue;
+        }
+        if event_type != Some("match") {
             continue;
         }
 
@@ -526,115 +692,217 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
             .trim_end_matches('\n');
         let highlighted_content = colors.highlight(content, &extract_submatches(data));
 
-        let func_info = fn_index.lookup(file, line_number).map(|node_idx| {
-            let node = &loaded.graph.nodes[node_idx];
-            let callers = split_callers(collect_callers(
-                &loaded.graph,
-                &loaded.backward_calls,
-                node_idx,
-                options.depth,
-            ));
-            let references = split_references(collect_references(
-                &loaded.graph,
-                &loaded.backward_references,
-                node_idx,
-            ));
-            (node, callers, references)
-        });
+        let enrichment_started_at = Instant::now();
+        let func_info = loaded
+            .payload
+            .function_index
+            .lookup(file, line_number)
+            .map(|node_idx| {
+                let node = &loaded.payload.graph.nodes[node_idx];
+                let callers = split_callers(collect_callers(
+                    &loaded.payload.graph,
+                    &loaded.payload.backward_calls,
+                    &loaded.payload.backward_references,
+                    node_idx,
+                    options.depth,
+                ));
+                let references = split_references(collect_references(
+                    &loaded.payload.graph,
+                    &loaded.payload.backward_calls,
+                    &loaded.payload.backward_references,
+                    node_idx,
+                ));
+                (node, callers, references)
+            });
+        timings.add("match_enrichment", enrichment_started_at.elapsed());
 
         if options.json_output {
+            let output_started_at = Instant::now();
             let mut out = serde_json::json!({
                 "file": file,
                 "line": line_number,
                 "content": content,
             });
             if let Some((node, callers, references)) = &func_info {
+                let (primary_callers, hidden_callers) =
+                    truncate_context(callers.primary.clone(), options.max_context);
+                let (test_callers, hidden_test_callers) =
+                    truncate_context(callers.test.clone(), options.max_context);
+                let (primary_references, hidden_references) =
+                    truncate_context(references.primary.clone(), options.max_context);
+                let (_, hidden_test_references) =
+                    truncate_context(references.test.clone(), options.max_context);
                 out["function"] = serde_json::json!(node.name);
                 out["qualified_name"] = serde_json::json!(node.qualified_name);
                 out["language"] = serde_json::to_value(node.language)?;
                 out["is_test"] = serde_json::json!(node.is_test);
                 out["callers"] = serde_json::to_value(if options.include_test_callers {
-                    callers
-                        .primary
+                    primary_callers
                         .iter()
-                        .chain(callers.test.iter())
+                        .chain(test_callers.iter())
                         .collect::<Vec<_>>()
                 } else {
-                    callers.primary.iter().collect::<Vec<_>>()
+                    primary_callers.iter().collect::<Vec<_>>()
                 })?;
+                if hidden_callers > 0 {
+                    out["hidden_callers"] = serde_json::json!(hidden_callers);
+                }
                 if !callers.test.is_empty() {
                     out["hidden_test_callers"] =
                         serde_json::json!(if options.include_test_callers {
-                            0
+                            hidden_test_callers
                         } else {
                             callers.test.len()
                         });
                 }
                 out["references"] =
-                    serde_json::to_value(references.primary.iter().collect::<Vec<_>>())?;
+                    serde_json::to_value(primary_references.iter().collect::<Vec<_>>())?;
+                if hidden_references > 0 {
+                    out["hidden_references"] = serde_json::json!(hidden_references);
+                }
                 if !references.test.is_empty() {
-                    out["hidden_test_references"] = serde_json::json!(references.test.len());
+                    out["hidden_test_references"] =
+                        serde_json::json!(references.test.len() + hidden_test_references);
                 }
             }
             println!("{}", serde_json::to_string(&out)?);
+            timings.add("output", output_started_at.elapsed());
             continue;
         }
 
+        if current_block
+            .as_ref()
+            .map(|block| block.file.as_str() != file)
+            .unwrap_or(false)
+        {
+            flush_block(&mut current_block, &colors, &mut timings);
+            pending_context_lines.clear();
+        }
+        let mut leading_context = pending_context_lines
+            .iter()
+            .filter(|context_line| {
+                context_line.line_number < line_number
+                    && line_number - context_line.line_number <= context.before
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        flush_block(&mut current_block, &colors, &mut timings);
+        pending_context_lines.clear();
+        pending_context_file = Some(file.to_string());
         if let Some((node, callers, references)) = &func_info {
-            let mut location = colors.format_location(file, &node.name, line_number);
+            let (primary_callers, hidden_callers) =
+                truncate_context(callers.primary.clone(), options.max_context);
+            let (test_callers, hidden_test_callers) =
+                truncate_context(callers.test.clone(), options.max_context);
+            let (primary_references, hidden_references) =
+                truncate_context(references.primary.clone(), options.max_context);
+            let (_, hidden_test_references) =
+                truncate_context(references.test.clone(), options.max_context);
+            let hidden_context = HiddenContextCounts {
+                callers: hidden_callers,
+                test_callers: hidden_test_callers,
+                references: hidden_references,
+                test_references: hidden_test_references,
+            };
+            let mut location = colors.format_location(file, &node.name);
             if options.compact {
                 let compact_sections = render_compact_sections(
                     &colors,
-                    callers,
-                    references,
+                    &CallerSplit {
+                        primary: primary_callers.clone(),
+                        test: test_callers.clone(),
+                    },
+                    &ReferenceSplit {
+                        primary: primary_references.clone(),
+                        test: Vec::new(),
+                    },
                     options.include_test_callers,
+                    &hidden_context,
                 );
                 if !compact_sections.is_empty() {
                     location.push(' ');
                     location.push_str(&compact_sections.join(" "));
                 }
             }
-            println!("{location}");
-            println!("  {highlighted_content}");
+            leading_context.push(SnippetLine {
+                line_number,
+                content: highlighted_content,
+                is_match: true,
+            });
+            let mut detail_lines = Vec::new();
             if !options.compact {
-                if !callers.primary.is_empty() {
-                    println!("  {}", colors.dim("Called via:"));
-                    for caller in &callers.primary {
-                        println!("    {}", colors.format_caller(caller));
+                if !primary_callers.is_empty() {
+                    detail_lines.push(format!("  {}", colors.dim("Called via:")));
+                    for caller in &primary_callers {
+                        detail_lines.push(format!("    {}", colors.format_caller(caller)));
                     }
                 }
-                if options.include_test_callers && !callers.test.is_empty() {
-                    println!("  {}", colors.dim("Called via tests:"));
-                    for caller in &callers.test {
-                        println!("    {}", colors.format_caller(caller));
-                    }
-                } else if let Some(summary) = summarize_hidden_test_callers(callers) {
-                    println!("  {}", colors.dim(&summary));
+                if let Some(summary) = summarize_hidden_context("caller", hidden_callers) {
+                    detail_lines.push(format!("    {}", colors.dim(&summary)));
                 }
-                if !references.primary.is_empty() {
-                    println!("  {}", colors.dim("Referenced by:"));
-                    for reference in &references.primary {
-                        println!("    {}", colors.format_reference(reference));
+                if options.include_test_callers && !test_callers.is_empty() {
+                    detail_lines.push(format!("  {}", colors.dim("Called via tests:")));
+                    for caller in &test_callers {
+                        detail_lines.push(format!("    {}", colors.format_caller(caller)));
                     }
-                } else if let Some(summary) = summarize_hidden_test_references(references) {
-                    println!("  {}", colors.dim(&summary));
+                    if let Some(summary) =
+                        summarize_hidden_context("test caller", hidden_test_callers)
+                    {
+                        detail_lines.push(format!("    {}", colors.dim(&summary)));
+                    }
+                } else if let Some(summary) =
+                    summarize_hidden_context("test caller", hidden_test_callers)
+                        .or_else(|| summarize_hidden_test_callers(callers))
+                {
+                    detail_lines.push(format!("    {}", colors.dim(&summary)));
+                }
+                if !primary_references.is_empty() {
+                    detail_lines.push(format!("  {}", colors.dim("Referenced by:")));
+                    for reference in &primary_references {
+                        detail_lines.push(format!("    {}", colors.format_reference(reference)));
+                    }
+                }
+                if let Some(summary) = summarize_hidden_context("reference", hidden_references) {
+                    detail_lines.push(format!("    {}", colors.dim(&summary)));
+                }
+                if let Some(summary) =
+                    summarize_hidden_context("test reference", hidden_test_references)
+                        .or_else(|| summarize_hidden_test_references(references))
+                {
+                    detail_lines.push(format!("    {}", colors.dim(&summary)));
                 }
             }
-            println!();
+            current_block = Some(RenderedBlock {
+                file: file.to_string(),
+                location,
+                match_line_number: line_number,
+                code_lines: leading_context,
+                detail_lines,
+            });
         } else {
-            println!(
-                "{}:{}:{}",
-                colors.path(file),
-                colors.line(line_number),
-                highlighted_content
-            );
+            leading_context.push(SnippetLine {
+                line_number,
+                content: highlighted_content,
+                is_match: true,
+            });
+            let location = colors.path(file);
+            current_block = Some(RenderedBlock {
+                file: file.to_string(),
+                location,
+                match_line_number: line_number,
+                code_lines: leading_context,
+                detail_lines: Vec::new(),
+            });
         }
     }
 
+    flush_block(&mut current_block, &colors, &mut timings);
     let status = child.wait()?;
+    timings.add("rg_run", rg_started_at.elapsed());
     if !status.success() && status.code() != Some(1) {
         anyhow::bail!("rg exited with status {status}");
     }
 
+    timings.print("query");
     Ok(())
 }

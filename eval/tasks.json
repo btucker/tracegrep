@@ -1,0 +1,408 @@
+[
+  {
+    "id": "vite-import-meta-glob-base",
+    "repo": {
+      "name": "vitejs/vite",
+      "url": "https://github.com/vitejs/vite.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 17453,
+      "url": "https://github.com/vitejs/vite/issues/17453",
+      "title": "`base` or `cwd` option for `import.meta.glob`"
+    },
+    "ground_truth": {
+      "pr_number": 20163,
+      "pr_url": "https://github.com/vitejs/vite/pull/20163",
+      "merge_commit": "253d6c6df2ebe3c4a88dabb6cec000128681561f",
+      "pre_fix_commit": "fceff60dc81730f7768b57f14e7a112facff387d"
+    },
+    "prompt": {
+      "title": "Add a `base` option to `import.meta.glob`",
+      "body": "Implement support for a `base` option on `import.meta.glob` so callers can make returned module keys relative to a chosen base directory instead of the original glob prefix. Update any relevant types, tests, and documentation. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation extend existing import-meta-glob plumbing instead of creating a parallel path?",
+      "Did it update types, tests, and docs consistently with the code change?",
+      "Did it avoid ad hoc string manipulation outside the existing transformation flow?"
+    ]
+  },
+  {
+    "id": "storybook-hide-toolbar-docs",
+    "repo": {
+      "name": "storybookjs/storybook",
+      "url": "https://github.com/storybookjs/storybook.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 22081,
+      "url": "https://github.com/storybookjs/storybook/issues/22081",
+      "title": "Add option to hide toolbars for doc pages"
+    },
+    "ground_truth": {
+      "pr_number": 29516,
+      "pr_url": "https://github.com/storybookjs/storybook/pull/29516",
+      "merge_commit": "1dc85c91c34f15952d6f43e6a199b62195347063",
+      "pre_fix_commit": "a4eaac454efd2409dda56e4486c66d00379f33cf"
+    },
+    "prompt": {
+      "title": "Add supported layout controls for hiding the docs toolbar",
+      "body": "Add a way to hide Storybook UI chrome for selected contexts, with the immediate use case of hiding the toolbar on docs pages. Update the relevant types, UI wiring, documentation, and any coverage the repo expects. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation extend existing manager/layout configuration rather than adding a one-off docs flag?",
+      "Did it update the public type surface and docs consistently?",
+      "Did it avoid duplicating toolbar/sidebar decision logic in multiple components?"
+    ]
+  },
+  {
+    "id": "vscode-ghostty-external-terminal",
+    "repo": {
+      "name": "microsoft/vscode",
+      "url": "https://github.com/microsoft/vscode.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 284265,
+      "url": "https://github.com/microsoft/vscode/issues/284265",
+      "title": "support ghostty as external terminal in macos, `osxExec` setting"
+    },
+    "ground_truth": {
+      "pr_number": 286983,
+      "pr_url": "https://github.com/microsoft/vscode/pull/286983",
+      "merge_commit": "8494e45e1f3e8c51c21aeb0ee7c3ebada6eb821c",
+      "pre_fix_commit": "c760ee7f43fef79ca1231f7c70bd3283073c9bd5"
+    },
+    "prompt": {
+      "title": "Add Ghostty support to VS Code external terminal launching",
+      "body": "Add support for launching Ghostty as an external terminal on macOS and Linux. Wire any required configuration or contribution points and add tests in the repository's normal style. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation follow the existing external terminal modeling pattern instead of introducing a bespoke Ghostty path?",
+      "Did it wire tests and configuration consistently with similar terminals?",
+      "Did it keep platform handling aligned with the service's current architecture?"
+    ]
+  },
+  {
+    "id": "eslint-no-duplicate-imports-unmergeable",
+    "repo": {
+      "name": "eslint/eslint",
+      "url": "https://github.com/eslint/eslint.git",
+      "license": "MIT",
+      "language": "JavaScript"
+    },
+    "issue": {
+      "number": 12758,
+      "url": "https://github.com/eslint/eslint/issues/12758",
+      "title": "[no-duplicate-imports] Treat namespace imports as different"
+    },
+    "ground_truth": {
+      "pr_number": 14238,
+      "pr_url": "https://github.com/eslint/eslint/pull/14238",
+      "merge_commit": "e44ce0a8acfaad513c385150c25e76e82a1b8f12",
+      "pre_fix_commit": "bb66a3d91af426dac9a7ffdbe47bdbbc0ffd4dd7"
+    },
+    "prompt": {
+      "title": "Make `no-duplicate-imports` ignore unmergeable imports and exports",
+      "body": "Update the `no-duplicate-imports` rule so namespace imports and other imports or exports that cannot actually be merged are not reported as duplicates. Update tests and documentation as needed for the behavior change. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation reuse the rule's existing mergeability logic rather than adding isolated exceptions?",
+      "Did it expand tests in the repo's normal rule-test style?",
+      "Did it document the new behavior coherently?"
+    ]
+  },
+  {
+    "id": "vscode-test-coverage-navigation",
+    "repo": {
+      "name": "microsoft/vscode",
+      "url": "https://github.com/microsoft/vscode.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 258967,
+      "url": "https://github.com/microsoft/vscode/issues/258967",
+      "title": "Add a \"Go to next missed line\" button to the Test Coverage Toolbar"
+    },
+    "ground_truth": {
+      "pr_number": 269505,
+      "pr_url": "https://github.com/microsoft/vscode/pull/269505",
+      "merge_commit": "98dd6045f57b8094639b6721c97d9975f1c1c3b8",
+      "pre_fix_commit": "8845fc4b5c9744c04a48025b2b10efe96e33f012"
+    },
+    "prompt": {
+      "title": "Add next/previous uncovered-line navigation for test coverage",
+      "body": "Add commands and UI affordances to navigate to the next and previous uncovered lines when viewing test coverage. Update any relevant command wiring, UI, and tests. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation wire commands and UI entry points coherently?",
+      "Did it keep navigation behavior consistent with the surrounding testing experience?",
+      "Did it add or update tests in the repo's normal style?"
+    ]
+  },
+  {
+    "id": "vscode-terminal-resize-overlay",
+    "repo": {
+      "name": "microsoft/vscode",
+      "url": "https://github.com/microsoft/vscode.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 284046,
+      "url": "https://github.com/microsoft/vscode/issues/284046",
+      "title": "Add overlay that shows terminal dimensions during resize"
+    },
+    "ground_truth": {
+      "pr_number": 284244,
+      "pr_url": "https://github.com/microsoft/vscode/pull/284244",
+      "merge_commit": "096a817788cdca6f3c1f59d3bcd5765e73bfe3b7",
+      "pre_fix_commit": "9193fd5dd2c48c5660bfbf6b1826ad26ee698ea6"
+    },
+    "prompt": {
+      "title": "Add a terminal resize dimensions overlay",
+      "body": "Add an overlay that shows the current terminal dimensions while the terminal is being resized. Update any relevant terminal UI code and tests. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation fit into the existing terminal UI architecture cleanly?",
+      "Did it keep styling and interaction behavior consistent with nearby terminal features?",
+      "Did it avoid spreading resize-overlay logic across unrelated components?"
+    ]
+  },
+  {
+    "id": "pnpm-sqlite-store-index",
+    "repo": {
+      "name": "pnpm/pnpm",
+      "url": "https://github.com/pnpm/pnpm.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 10826,
+      "url": "https://github.com/pnpm/pnpm/issues/10826",
+      "title": "[RFC] Use SQLite for package metadata within pnpm store"
+    },
+    "ground_truth": {
+      "pr_number": 10827,
+      "pr_url": "https://github.com/pnpm/pnpm/pull/10827",
+      "merge_commit": "b7f0f215820a7ed803ea6e6cebf2ae92a63b1ed4",
+      "pre_fix_commit": "0bf7051fb3330a36a780229245622cda9ac85b7d"
+    },
+    "prompt": {
+      "title": "Move pnpm store package indexing to SQLite",
+      "body": "Replace pnpm's package metadata indexing in the content-addressable store with a SQLite-backed implementation. Update the relevant storage code, migration or compatibility handling, and tests. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation fit the new storage layer into the existing store architecture cleanly?",
+      "Did it preserve expected package-index behavior while changing the backing implementation?",
+      "Did it update tests around store reads and writes in the repository's normal style?"
+    ]
+  },
+  {
+    "id": "pnpm-workspace-bare-protocol",
+    "repo": {
+      "name": "pnpm/pnpm",
+      "url": "https://github.com/pnpm/pnpm.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 10381,
+      "url": "https://github.com/pnpm/pnpm/issues/10381",
+      "title": "Support `workspace:` specifiers (without `*`, `^`, `~`)"
+    },
+    "ground_truth": {
+      "pr_number": 10436,
+      "pr_url": "https://github.com/pnpm/pnpm/pull/10436",
+      "merge_commit": "0625e204426a2647119c96e1ddc227ada63e2be5",
+      "pre_fix_commit": "af7a7efe00ae49f4c61f6793380ae644eb301c51"
+    },
+    "prompt": {
+      "title": "Support bare `workspace:` dependency specifiers",
+      "body": "Add support for bare `workspace:` dependency specifiers without an explicit range suffix. Update the relevant parsing, normalization, and test coverage. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation extend existing workspace-specifier handling instead of branching off a one-off path?",
+      "Did it preserve the current semantics for explicit workspace ranges?",
+      "Did it add coverage for parsing and lockfile behavior in the repository's normal style?"
+    ]
+  },
+  {
+    "id": "pnpm-trust-policy-ignore-after",
+    "repo": {
+      "name": "pnpm/pnpm",
+      "url": "https://github.com/pnpm/pnpm.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 10352,
+      "url": "https://github.com/pnpm/pnpm/issues/10352",
+      "title": "trustPolicyIgnoreAfter"
+    },
+    "ground_truth": {
+      "pr_number": 10359,
+      "pr_url": "https://github.com/pnpm/pnpm/pull/10359",
+      "merge_commit": "facdd717bfee5ae3d6832a30d2a54f26cc0411cc",
+      "pre_fix_commit": "71de2b3f2b308ac2e9bf6e7ea0217d522a3d651a"
+    },
+    "prompt": {
+      "title": "Add `trustPolicyIgnoreAfter` support",
+      "body": "Add support for a `trustPolicyIgnoreAfter` setting that controls when trust policy checks should stop applying. Update the relevant configuration handling, enforcement logic, and tests. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation thread the new setting through existing trust-policy configuration and enforcement cleanly?",
+      "Did it preserve current behavior when the setting is not configured?",
+      "Did it add coverage for boundary conditions and configuration parsing in the repository's normal style?"
+    ]
+  },
+  {
+    "id": "pnpm-pack-dry-run",
+    "repo": {
+      "name": "pnpm/pnpm",
+      "url": "https://github.com/pnpm/pnpm.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 10301,
+      "url": "https://github.com/pnpm/pnpm/issues/10301",
+      "title": "Add support for `pack --dry-run`"
+    },
+    "ground_truth": {
+      "pr_number": 10306,
+      "pr_url": "https://github.com/pnpm/pnpm/pull/10306",
+      "merge_commit": "144d76f15fc2375955e61d6389bc37c347c674de",
+      "pre_fix_commit": "e0f0a7d85f32e2441c6f55948aa3b93f374c0861"
+    },
+    "prompt": {
+      "title": "Add `pnpm pack --dry-run` support",
+      "body": "Add support for a `--dry-run` mode on `pnpm pack`. Update the relevant CLI behavior, output handling, and test coverage. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation reuse the existing pack pipeline instead of creating a parallel dry-run code path?",
+      "Did it keep command output and exit behavior coherent with other pnpm dry-run features?",
+      "Did it add tests that cover both normal and dry-run behavior in the repository's usual style?"
+    ]
+  },
+  {
+    "id": "vitest-coverage-ignore-hints",
+    "repo": {
+      "name": "vitest-dev/vitest",
+      "url": "https://github.com/vitest-dev/vitest.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 9203,
+      "url": "https://github.com/vitest-dev/vitest/issues/9203",
+      "title": "Add `ignore start` and `ignore stop` coverage ignore hints"
+    },
+    "ground_truth": {
+      "pr_number": 9204,
+      "pr_url": "https://github.com/vitest-dev/vitest/pull/9204",
+      "merge_commit": "e59c94ba6638446b0a7c16990a82133d3c1437d3",
+      "pre_fix_commit": "2bea549c74348cfab474adcc2887404782130695"
+    },
+    "prompt": {
+      "title": "Add start/stop coverage ignore hints",
+      "body": "Add support for `ignore start` and `ignore stop` coverage ignore hints. Update the relevant coverage processing, provider integration, and tests. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation extend existing coverage-ignore handling rather than layering in provider-specific exceptions?",
+      "Did it keep behavior aligned across the supported coverage providers?",
+      "Did it add or update tests around nested and boundary cases in the repository's normal style?"
+    ]
+  },
+  {
+    "id": "vitest-flaky-summary-reporter",
+    "repo": {
+      "name": "vitest-dev/vitest",
+      "url": "https://github.com/vitest-dev/vitest.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 9498,
+      "url": "https://github.com/vitest-dev/vitest/issues/9498",
+      "title": "add \"flaky tests\" summary to Github Actions Reporter"
+    },
+    "ground_truth": {
+      "pr_number": 9579,
+      "pr_url": "https://github.com/vitest-dev/vitest/pull/9579",
+      "merge_commit": "96bfc834542748824cbde26f10473455fdaca1a8",
+      "pre_fix_commit": "97dae8a75e8ca72fc42db190f17d818c41515ef6"
+    },
+    "prompt": {
+      "title": "Add flaky-test summary output to the GitHub Actions reporter",
+      "body": "Add reporter output that summarizes flaky tests in the GitHub Actions reporter. Update the relevant reporter behavior and tests. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation fit the new summary into the existing GitHub Actions reporter structure cleanly?",
+      "Did it keep flaky-test reporting behavior consistent with the rest of Vitest's summary output?",
+      "Did it add coverage for the reporter output in the repository's normal style?"
+    ]
+  },
+  {
+    "id": "vitest-no-transforms-mode",
+    "repo": {
+      "name": "vitest-dev/vitest",
+      "url": "https://github.com/vitest-dev/vitest.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 9181,
+      "url": "https://github.com/vitest-dev/vitest/issues/9181",
+      "title": "Allow running Vitest without any transforms"
+    },
+    "ground_truth": {
+      "pr_number": 9210,
+      "pr_url": "https://github.com/vitest-dev/vitest/pull/9210",
+      "merge_commit": "9be6121eee4bd636149c863aeabd0a82a0a2990d",
+      "pre_fix_commit": "2de117af914466d7ed98ee62809aaeec85b1e25f"
+    },
+    "prompt": {
+      "title": "Add a mode for running Vitest without transforms",
+      "body": "Add support for running Vitest without applying transforms. Update the relevant runner configuration, module execution path, and tests. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation integrate the new mode into the existing runner and configuration flow cleanly?",
+      "Did it preserve current behavior when the mode is not enabled?",
+      "Did it cover the execution-path differences in the repository's usual test style?"
+    ]
+  },
+  {
+    "id": "vitest-browser-connect-launch-options",
+    "repo": {
+      "name": "vitest-dev/vitest",
+      "url": "https://github.com/vitest-dev/vitest.git",
+      "license": "MIT",
+      "language": "TypeScript"
+    },
+    "issue": {
+      "number": 9660,
+      "url": "https://github.com/vitest-dev/vitest/issues/9660",
+      "title": "support `launchOptions` with `connectOptions` on browser mode playwright"
+    },
+    "ground_truth": {
+      "pr_number": 9702,
+      "pr_url": "https://github.com/vitest-dev/vitest/pull/9702",
+      "merge_commit": "f0ff1b2a0011f4f6c0ac544549115593c4947788",
+      "pre_fix_commit": "05f1854e24fb96694ca86a7b4bbf384553f2219d"
+    },
+    "prompt": {
+      "title": "Support `launchOptions` together with `connectOptions` in browser-mode Playwright",
+      "body": "Add support for using Playwright `launchOptions` together with `connectOptions` in Vitest browser mode. Update the relevant browser provider handling and tests. Work only from the checked-out repository state and this prompt."
+    },
+    "evaluation_focus": [
+      "Did the implementation extend the browser-mode Playwright configuration flow instead of introducing a separate path for combined options?",
+      "Did it keep browser provider behavior coherent with existing launch and connect handling?",
+      "Did it add coverage for the combined-options case in the repository's normal style?"
+    ]
+  }
+]

@@ -38,6 +38,16 @@ cargo install --path .
 
 This installs both `tracegrep` and `tg`.
 
+Then install shell completions:
+
+```bash
+tg --install-completions
+```
+
+`tg` auto-detects `bash`, `zsh`, or `fish` from `$SHELL`. For `bash` and `zsh`,
+it also updates your shell rc file so completions load in new shells. Restart the
+shell after installation, or source the updated rc file once.
+
 ### Claude Code (via Plugin Marketplace)
 
 In Claude Code, register the repository marketplace first:
@@ -69,6 +79,7 @@ Verify the CLI:
 ```bash
 tracegrep --version
 tg --help
+tg --generate complete-zsh | head
 ```
 
 In Claude Code, start a fresh session and ask it to search the repo. It should prefer `tg`/`tracegrep`-aware search flow rather than raw `rg`.
@@ -78,6 +89,9 @@ In Claude Code, start a fresh session and ask it to search the repo. It should p
 After `cargo install --path .`, both `tracegrep` and `tg` are installed.
 
 ```bash
+# Install completions once for the current shell
+tg --install-completions
+
 # Search with caller/reference context
 tg tool_data /path/to/repo
 
@@ -89,6 +103,9 @@ tg --include-tests --include-test-callers tool_data /path/to/repo
 
 # Search a subset of the repo with rg-style path arguments
 tg tool_data src tests
+
+# Emit a completion script without installing it
+tg --generate complete-zsh
 ```
 
 ## Example output
@@ -138,7 +155,8 @@ tests/integration.rs:2:    validate_body();</code></pre>
 - The preferred CLI shape mirrors `rg`: `tracegrep [flags] <pattern> [path ...]`.
 - Most `rg` flags can be passed through before `<pattern>`, but tools that
   expect raw `rg` output should keep using `rg`.
-- Each supported language is cached separately under `~/.cache/tracegrep/`, then merged in memory at query time.
+- Each supported language is cached separately under `~/.cache/tracegrep/` by default, then merged in memory at query time.
+- Set `TRACEGREP_CACHE_DIR` to override the cache root directory, for example in sandboxed eval runs.
 - The call graph is rebuilt automatically when the relevant per-language cache is missing or its stored `HEAD` no longer matches the repo.
 - Function references passed as arguments are shown separately from direct callers.
 - The current resolver is heuristic and language-local; it does not attempt import-aware or type-aware cross-file analysis.
