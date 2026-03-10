@@ -463,7 +463,7 @@ def configure_condition_environment(worktree: Path, condition: str) -> None:
     tg_binary_path = local_tg_path(worktree)
     cache_root = local_cache_root(worktree)
 
-    write_worktree_gitignore(worktree)
+    write_worktree_excludes(worktree)
 
     if condition == "tg":
         if not TRACEGREP_SKILL_SOURCE.exists():
@@ -486,10 +486,20 @@ def configure_condition_environment(worktree: Path, condition: str) -> None:
     remove_tree(cache_root)
 
 
-def write_worktree_gitignore(worktree: Path) -> None:
+def write_worktree_excludes(worktree: Path) -> None:
+    git_dir = Path(
+        run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=worktree,
+            capture_output=True,
+        ).stdout.strip()
+    )
+    if not git_dir.is_absolute():
+        git_dir = worktree / git_dir
+    info_dir = git_dir / "info"
+    info_dir.mkdir(parents=True, exist_ok=True)
     lines = [f"{d}/" for d in WORKTREE_SNAPSHOT_EXCLUDES]
-    lines.append(".gitignore")
-    (worktree / ".gitignore").write_text("\n".join(lines) + "\n")
+    (info_dir / "exclude").write_text("\n".join(lines) + "\n")
 
 
 def condition_search_guidance(condition: str) -> str:
