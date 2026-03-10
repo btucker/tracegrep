@@ -487,7 +487,7 @@ fn render_compact_sections(
     if !callers.primary.is_empty() {
         sections.push(format_compact_section(
             colors,
-            "Called via",
+            "Called by",
             &callers
                 .primary
                 .iter()
@@ -498,7 +498,7 @@ fn render_compact_sections(
     if include_test_callers && !callers.test.is_empty() {
         sections.push(format_compact_section(
             colors,
-            "Called via tests",
+            "Called by tests",
             &callers
                 .test
                 .iter()
@@ -836,7 +836,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
             let mut detail_lines = Vec::new();
             if !options.compact {
                 if !primary_callers.is_empty() {
-                    detail_lines.push(format!("  {}", colors.dim("Called via:")));
+                    detail_lines.push(format!("  {}", colors.dim("Called by:")));
                     for caller in &primary_callers {
                         detail_lines.push(format!("    {}", colors.format_caller(caller)));
                     }
@@ -845,7 +845,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                     detail_lines.push(format!("    {}", colors.dim(&summary)));
                 }
                 if options.include_test_callers && !test_callers.is_empty() {
-                    detail_lines.push(format!("  {}", colors.dim("Called via tests:")));
+                    detail_lines.push(format!("  {}", colors.dim("Called by tests:")));
                     for caller in &test_callers {
                         detail_lines.push(format!("    {}", colors.format_caller(caller)));
                     }

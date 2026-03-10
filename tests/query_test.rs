@@ -193,7 +193,7 @@ fn test_query_finds_matches_with_call_context() {
     assert!(stdout.contains("validate_body"), "stdout:\n{stdout}");
     assert!(stdout.contains("router"), "stdout:\n{stdout}");
     assert!(
-        stdout.contains("validate_body();\n  Called via:"),
+        stdout.contains("validate_body();\n  Called by:"),
         "stdout:\n{stdout}"
     );
 }
@@ -317,7 +317,7 @@ fn test_query_accepts_rg_style_positional_path() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("validate_body"), "stdout:\n{stdout}");
-    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called by:"), "stdout:\n{stdout}");
 }
 
 #[test]
@@ -361,7 +361,7 @@ fn end() {}
         "stdout:\n{stdout}"
     );
     let end_idx = stdout.find("end();").unwrap();
-    let called_via_idx = stdout.find("Called via:").unwrap();
+    let called_via_idx = stdout.find("Called by:").unwrap();
     assert!(end_idx < called_via_idx, "stdout:\n{stdout}");
 }
 
@@ -419,7 +419,7 @@ fn test_query_accepts_multiple_positional_paths() {
     );
     assert!(stdout.contains("src/main.rs"), "stdout:\n{stdout}");
     assert!(stdout.contains("tests/integration.rs"), "stdout:\n{stdout}");
-    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called by:"), "stdout:\n{stdout}");
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn test_query_uses_rg_style_colors_when_forced() {
         "stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("\u{1b}[0m\u{1b}[2mCalled via:\u{1b}[0m"),
+        stdout.contains("\u{1b}[0m\u{1b}[2mCalled by:\u{1b}[0m"),
         "stdout:\n{stdout}"
     );
 }
@@ -471,7 +471,7 @@ fn test_query_hides_test_callers_by_default() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("1 test caller hidden"), "stdout:\n{stdout}");
-    assert!(!stdout.contains("Called via tests:"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("Called by tests:"), "stdout:\n{stdout}");
 }
 
 #[test]
@@ -488,7 +488,7 @@ fn test_query_can_show_test_callers_explicitly() {
         "stderr: {}",
         String::from_utf8(output.stderr).unwrap()
     );
-    assert!(stdout.contains("Called via tests:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called by tests:"), "stdout:\n{stdout}");
     assert!(stdout.contains("test_validate_body"), "stdout:\n{stdout}");
 }
 
@@ -519,11 +519,11 @@ fn test_query_compact_inlines_context_sections() {
     );
     assert!(
         stdout.contains("src/main.rs:validate_body")
-            && stdout.contains("[Called via:")
+            && stdout.contains("[Called by:")
             && stdout.contains("[Referenced by:"),
         "stdout:\n{stdout}"
     );
-    assert!(!stdout.contains("\n  Called via:"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("\n  Called by:"), "stdout:\n{stdout}");
     assert!(!stdout.contains("\n  Referenced by:"), "stdout:\n{stdout}");
 }
 
@@ -575,7 +575,7 @@ fn test_query_rebuilds_stale_cache_after_head_changes() {
         String::from_utf8(second.stderr).unwrap()
     );
     assert!(
-        stdout.contains("Called via:") && stdout.contains("main"),
+        stdout.contains("Called by:") && stdout.contains("main"),
         "expected rebuilt cache to include new caller, got:\n{stdout}"
     );
 }
@@ -608,7 +608,7 @@ def register_handler(handler):
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("app.py"), "stdout:\n{stdout}");
-    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called by:"), "stdout:\n{stdout}");
     assert!(stdout.contains("router"), "stdout:\n{stdout}");
     assert!(stdout.contains("Referenced by:"), "stdout:\n{stdout}");
     assert!(stdout.contains("register_handler"), "stdout:\n{stdout}");
@@ -636,7 +636,7 @@ function helper() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("ui.ts"), "stdout:\n{stdout}");
-    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called by:"), "stdout:\n{stdout}");
     assert!(stdout.contains("render"), "stdout:\n{stdout}");
 }
 
@@ -666,7 +666,7 @@ function label() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("Button.jsx"), "stdout:\n{stdout}");
-    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called by:"), "stdout:\n{stdout}");
     assert!(stdout.contains("Button"), "stdout:\n{stdout}");
 }
 
@@ -694,7 +694,7 @@ fn test_query_supports_svelte_template_calls() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(stdout.contains("Button.svelte"), "stdout:\n{stdout}");
-    assert!(stdout.contains("Called via:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Called by:"), "stdout:\n{stdout}");
     assert!(stdout.contains("template"), "stdout:\n{stdout}");
 }
 

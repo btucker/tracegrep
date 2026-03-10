@@ -114,12 +114,12 @@ tests/integration.rs:2:    validate_body();</code></pre>
 
 src/main.rs:router:8
           validate_body();
-  Called via:
+  Called by:
     src/main.rs:main:1
 
 src/main.rs:validate_body:13
   fn validate_body() {
-  Called via:
+  Called by:
     src/main.rs:router:6  (when method == "POST")
   Referenced by:
     src/main.rs:main:1  (passed to register_handler)
@@ -137,8 +137,8 @@ tests/integration.rs:2:    validate_body();</code></pre>
 - The preferred CLI shape mirrors `rg`: `tracegrep [flags] <pattern> [path ...]`.
 - Most `rg` flags can be passed through before `<pattern>`, but tools that
   expect raw `rg` output should keep using `rg`.
-- Each supported language is cached separately under `~/.cache/tracegrep/` by default, then merged in memory at query time.
-- Set `TRACEGREP_CACHE_DIR` to override the cache root directory, for example in sandboxed eval runs.
+- Each supported language is cached separately under `.git/tracegrep/` by default, then merged in memory at query time.
+- Set `TRACEGREP_CACHE_DIR` to override the cache root directory.
 - The call graph is rebuilt automatically when the relevant per-language cache is missing or its stored `HEAD` no longer matches the repo.
 - Function references passed as arguments are shown separately from direct callers.
 - The current resolver is heuristic and language-local; it does not attempt import-aware or type-aware cross-file analysis.

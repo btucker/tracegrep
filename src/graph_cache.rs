@@ -13,7 +13,6 @@ use crate::query_data::QueryCachePayload;
 use crate::timing::TimingCollector;
 
 const CACHE_DIR_ENV: &str = "TRACEGREP_CACHE_DIR";
-const CACHE_DIR: &str = ".cache/tracegrep";
 const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,22 +115,36 @@ fn hex_hash(bytes: &[u8]) -> String {
     out
 }
 
+fn git_common_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(repo_path)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("Failed to read git common dir in {}", repo_path.display());
+    }
+    let raw = String::from_utf8(output.stdout)?.trim().to_string();
+    let path = PathBuf::from(&raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(repo_path.join(path))
+    }
+}
+
 fn repo_cache_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
-    let cache_root = std::env::var_os(CACHE_DIR_ENV)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").expect("HOME is not set");
-            PathBuf::from(home).join(CACHE_DIR)
-        });
-    let repo_key = repo_path.to_string_lossy();
-    let slug = repo_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("repo");
-    let hash = &hex_hash(repo_key.as_bytes())[..16];
-    Ok(cache_root.join(format!("{slug}-{hash}")))
+    if let Some(cache_root) = std::env::var_os(CACHE_DIR_ENV).filter(|value| !value.is_empty()) {
+        let cache_root = PathBuf::from(cache_root);
+        let repo_key = repo_path.to_string_lossy();
+        let slug = repo_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("repo");
+        let hash = &hex_hash(repo_key.as_bytes())[..16];
+        return Ok(cache_root.join(format!("{slug}-{hash}")));
+    }
+    Ok(git_common_dir(repo_path)?.join("tracegrep"))
 }
 
 pub fn graph_cache_path(
