@@ -110,40 +110,31 @@ tg --generate complete-zsh
 
 ## Example output
 
-Searching for `validate_body` in a small repo shows the difference in
-shape immediately:
+Same search, `rg` vs `tg` — tracegrep shows which function contains each
+match and where it is called from:
 
 <table>
   <tr>
-    <th><code>rg -n validate_body</code></th>
-    <th><code>tg validate_body /path/to/repo</code></th>
+    <th><code>rg "tool_block"</code></th>
+    <th><code>tg "tool_block"</code></th>
   </tr>
   <tr>
     <td valign="top">
-      <pre lang="text"><code>src/main.rs:3:    register_handler(validate_body);
-src/main.rs:8:        validate_body();
-src/main.rs:13:fn validate_body() {
-tests/integration.rs:1:fn test_validate_body() {
-tests/integration.rs:2:    validate_body();</code></pre>
+      <pre lang="text"><code>src/daemon/stream.rs
+212:    let blocks = extract_tool_blocks(session_events);
+279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {</code></pre>
     </td>
     <td valign="top">
-      <pre lang="text"><code>src/main.rs:main:3
-      register_handler(validate_body);
-
-src/main.rs:router:8
-          validate_body();
+      <pre lang="text"><code>src/daemon/stream.rs:append_tool_data_effects
+212:    let blocks = extract_tool_blocks(session_events);
   Called via:
-    src/main.rs:main:1
+    src/daemon/stream.rs:process_lead_output:110  (when events.get(main_lead_session_name) is Some(lead_events) && ...)
 
-src/main.rs:validate_body:13
-  fn validate_body() {
+src/daemon/stream.rs:extract_tool_blocks
+279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {
   Called via:
-    src/main.rs:router:6  (when method == "POST")
-  Referenced by:
-    src/main.rs:main:1  (passed to register_handler)
-
-tests/integration.rs:1:fn test_validate_body() {
-tests/integration.rs:2:    validate_body();</code></pre>
+    src/daemon/stream.rs:append_tool_data_effects:206
+    src/daemon/stream.rs:process_agent_output:552  (when events.get(name.as_str()) is Some(coworker_events))</code></pre>
     </td>
   </tr>
 </table>
