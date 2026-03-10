@@ -1108,3 +1108,90 @@ fn test_install_zsh_completions_writes_files_and_updates_rc() {
         "rc:\n{rc}"
     );
 }
+
+#[test]
+fn test_query_finds_calls_inside_macro_invocations() {
+    let dir = create_repo(&[(
+        "src/main.rs",
+        r#"fn run() {
+    tokio::select! {
+        result = async_op() => {
+            handle_result(result);
+        }
+        _ = shutdown() => {
+            cleanup();
+        }
+    }
+}
+
+fn async_op() {}
+fn handle_result(_r: ()) {}
+fn shutdown() {}
+fn cleanup() {}
+"#,
+    )]);
+
+    let output = run_tracegrep(dir.path(), &["--json", "handle_result"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+
+    // handle_result is called inside tokio::select! — it should show run() as a caller
+    let mut found_caller = false;
+    for line in stdout.lines() {
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        if let Some(callers) = parsed.get("callers").and_then(|c| c.as_array()) {
+            for caller in callers {
+                if caller["function"].as_str() == Some("run") {
+                    found_caller = true;
+                }
+            }
+        }
+    }
+    assert!(
+        found_caller,
+        "expected run() to be listed as caller of handle_result via macro body.\nstdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_query_finds_calls_inside_assert_macro() {
+    let dir = create_repo(&[(
+        "src/main.rs",
+        r#"fn check() {
+    assert!(validate());
+    assert_eq!(compute(), 42);
+}
+
+fn validate() -> bool { true }
+fn compute() -> i32 { 42 }
+"#,
+    )]);
+
+    let output = run_tracegrep(dir.path(), &["--json", "fn validate"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+
+    let mut found_caller = false;
+    for line in stdout.lines() {
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        if let Some(callers) = parsed.get("callers").and_then(|c| c.as_array()) {
+            for caller in callers {
+                if caller["function"].as_str() == Some("check") {
+                    found_caller = true;
+                }
+            }
+        }
+    }
+    assert!(
+        found_caller,
+        "expected check() to be listed as caller of validate via assert! macro.\nstdout:\n{stdout}"
+    );
+}

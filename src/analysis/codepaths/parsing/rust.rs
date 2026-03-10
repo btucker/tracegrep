@@ -126,9 +126,100 @@ fn collect_calls(
         collect_argument_references(node, src, reference_sites);
     }
 
+    if node.kind() == "macro_invocation" {
+        collect_calls_from_macro_body(node, src, call_sites, reference_sites);
+        return;
+    }
+
     for i in 0..node.child_count() {
         if let Some(child) = node.child(u32::try_from(i).unwrap()) {
             collect_calls(child, src, call_sites, reference_sites);
+        }
+    }
+}
+
+/// Re-parses the token_tree body of a macro invocation as Rust code to find
+/// call expressions that tree-sitter cannot see in the opaque token stream.
+fn collect_calls_from_macro_body(
+    macro_node: tree_sitter::Node,
+    src: &[u8],
+    call_sites: &mut Vec<CallSite>,
+    reference_sites: &mut Vec<ReferenceSite>,
+) {
+    let token_tree = (0..macro_node.child_count())
+        .filter_map(|i| macro_node.child(u32::try_from(i).unwrap()))
+        .find(|child| child.kind() == "token_tree");
+    let Some(tt) = token_tree else { return };
+    let tt_text = tt.utf8_text(src).unwrap_or("");
+    // token_tree includes the outer delimiters (braces/parens/brackets).
+    // Strip them to get the inner content.
+    let inner = tt_text
+        .strip_prefix('{')
+        .or_else(|| tt_text.strip_prefix('('))
+        .or_else(|| tt_text.strip_prefix('['))
+        .and_then(|s| {
+            s.strip_suffix('}')
+                .or_else(|| s.strip_suffix(')'))
+                .or_else(|| s.strip_suffix(']'))
+        })
+        .unwrap_or(tt_text);
+
+    // Wrap in a function body so tree-sitter can parse it as valid Rust.
+    let synthetic = format!("fn __macro_body() {{ {inner} }}");
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .is_err()
+    {
+        return;
+    }
+    let Some(tree) = parser.parse(&synthetic, None) else {
+        return;
+    };
+    let syn_src = synthetic.as_bytes();
+    let root = tree.root_node();
+
+    // Find the function body and collect calls from it.
+    collect_calls_from_synthetic(root, syn_src, call_sites, reference_sites);
+}
+
+/// Walks a re-parsed synthetic tree to collect call expressions.
+/// Skips condition extraction since the synthetic tree lacks the original context.
+fn collect_calls_from_synthetic(
+    node: tree_sitter::Node,
+    src: &[u8],
+    call_sites: &mut Vec<CallSite>,
+    reference_sites: &mut Vec<ReferenceSite>,
+) {
+    if node.kind() == "function_item" {
+        // Recurse into the synthetic wrapper function's body
+        if let Some(body) = node.child_by_field_name("body") {
+            collect_calls_from_synthetic(body, src, call_sites, reference_sites);
+        }
+        return;
+    }
+
+    if node.kind() == "call_expression" {
+        if let Some(func_node) = node.child_by_field_name("function") {
+            let raw = extract_callee_name(func_node, src);
+            if !raw.is_empty() {
+                call_sites.push(CallSite {
+                    callee_name: raw,
+                    conditions: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // Recurse into nested macro invocations within the re-parsed body
+    if node.kind() == "macro_invocation" {
+        collect_calls_from_macro_body(node, src, call_sites, reference_sites);
+        return;
+    }
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(u32::try_from(i).unwrap()) {
+            collect_calls_from_synthetic(child, src, call_sites, reference_sites);
         }
     }
 }
@@ -289,5 +380,131 @@ fn extract_callee_name(node: tree_sitter::Node, src: &[u8]) -> String {
             }
         }
         _ => node.utf8_text(src).unwrap_or("").to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::codepaths::{new_parser, Language};
+
+    fn parse_rust_calls(source: &str) -> Vec<FunctionArtifact> {
+        let mut parser = new_parser(Language::Rust).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let src = source.as_bytes();
+        let ctx = ParseContext {
+            language: Language::Rust,
+            module_name: "test".to_string(),
+            file_is_test: false,
+            include_tests: false,
+        };
+        let artifact = extract(root, src, &ctx).unwrap();
+        artifact.functions
+    }
+
+    fn callee_names(fns: &[FunctionArtifact], fn_name: &str) -> Vec<String> {
+        fns.iter()
+            .find(|f| f.name == fn_name)
+            .map(|f| f.call_sites.iter().map(|c| c.callee_name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_calls_inside_macro_select_are_found() {
+        let source = r#"
+fn run() {
+    tokio::select! {
+        result = async_op() => {
+            handle_result(result);
+        }
+        _ = shutdown() => {
+            cleanup();
+        }
+    }
+}
+
+fn async_op() {}
+fn handle_result(_r: ()) {}
+fn shutdown() {}
+fn cleanup() {}
+"#;
+        let fns = parse_rust_calls(source);
+        let callees = callee_names(&fns, "run");
+        assert!(
+            callees.contains(&"async_op".to_string()),
+            "expected async_op in callees of run(), got: {callees:?}"
+        );
+        assert!(
+            callees.contains(&"handle_result".to_string()),
+            "expected handle_result in callees of run(), got: {callees:?}"
+        );
+        assert!(
+            callees.contains(&"cleanup".to_string()),
+            "expected cleanup in callees of run(), got: {callees:?}"
+        );
+    }
+
+    #[test]
+    fn test_calls_inside_assert_macro_are_found() {
+        let source = r#"
+fn check() {
+    assert!(validate());
+    assert_eq!(compute(), 42);
+}
+
+fn validate() -> bool { true }
+fn compute() -> i32 { 42 }
+"#;
+        let fns = parse_rust_calls(source);
+        let callees = callee_names(&fns, "check");
+        assert!(
+            callees.contains(&"validate".to_string()),
+            "expected validate in callees of check(), got: {callees:?}"
+        );
+        assert!(
+            callees.contains(&"compute".to_string()),
+            "expected compute in callees of check(), got: {callees:?}"
+        );
+    }
+
+    #[test]
+    fn test_calls_outside_macro_still_work() {
+        let source = r#"
+fn main() {
+    hello();
+    world();
+}
+
+fn hello() {}
+fn world() {}
+"#;
+        let fns = parse_rust_calls(source);
+        let callees = callee_names(&fns, "main");
+        assert!(callees.contains(&"hello".to_string()));
+        assert!(callees.contains(&"world".to_string()));
+    }
+
+    #[test]
+    fn test_nested_macro_calls_are_found() {
+        let source = r#"
+fn process() {
+    println!("{}", format_data());
+    vec![create_item()];
+}
+
+fn format_data() -> String { String::new() }
+fn create_item() -> i32 { 0 }
+"#;
+        let fns = parse_rust_calls(source);
+        let callees = callee_names(&fns, "process");
+        assert!(
+            callees.contains(&"format_data".to_string()),
+            "expected format_data in callees of process(), got: {callees:?}"
+        );
+        assert!(
+            callees.contains(&"create_item".to_string()),
+            "expected create_item in callees of process(), got: {callees:?}"
+        );
     }
 }
