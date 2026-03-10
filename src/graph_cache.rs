@@ -115,6 +115,26 @@ fn hex_hash(bytes: &[u8]) -> String {
     out
 }
 
+fn git_common_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(repo_path)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Failed to read git common dir in {}",
+            repo_path.display()
+        );
+    }
+    let raw = String::from_utf8(output.stdout)?.trim().to_string();
+    let path = PathBuf::from(&raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(repo_path.join(path))
+    }
+}
+
 fn repo_cache_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
     if let Some(cache_root) = std::env::var_os(CACHE_DIR_ENV).filter(|value| !value.is_empty()) {
         let cache_root = PathBuf::from(cache_root);
@@ -127,7 +147,7 @@ fn repo_cache_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
         let hash = &hex_hash(repo_key.as_bytes())[..16];
         return Ok(cache_root.join(format!("{slug}-{hash}")));
     }
-    Ok(repo_path.join(".git/tracegrep"))
+    Ok(git_common_dir(repo_path)?.join("tracegrep"))
 }
 
 pub fn graph_cache_path(
