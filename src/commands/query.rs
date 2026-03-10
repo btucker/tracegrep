@@ -43,6 +43,13 @@ struct ReferenceSplit {
     test: Vec<ReferenceInfo>,
 }
 
+struct HiddenContextCounts {
+    callers: usize,
+    test_callers: usize,
+    references: usize,
+    test_references: usize,
+}
+
 pub struct QueryOptions<'a> {
     pub json_output: bool,
     pub compact: bool,
@@ -152,8 +159,8 @@ impl Colors {
         out
     }
 
-    fn format_location(&self, file: &str, function: &str, line: usize) -> String {
-        format!("{}:{}:{}", self.path(file), function, self.line(line))
+    fn format_location(&self, file: &str, function: &str) -> String {
+        format!("{}:{}", self.path(file), function)
     }
 
     fn format_caller(&self, caller: &CallerInfo) -> String {
@@ -469,11 +476,12 @@ fn render_compact_sections(
     callers: &CallerSplit,
     references: &ReferenceSplit,
     include_test_callers: bool,
-    hidden_callers: usize,
-    hidden_test_callers: usize,
-    hidden_references: usize,
-    hidden_test_references: usize,
+    hidden: &HiddenContextCounts,
 ) -> Vec<String> {
+    let hidden_callers = hidden.callers;
+    let hidden_test_callers = hidden.test_callers;
+    let hidden_references = hidden.references;
+    let hidden_test_references = hidden.test_references;
     let mut sections = Vec::new();
 
     if !callers.primary.is_empty() {
@@ -729,7 +737,6 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                 let (_, hidden_test_references) =
                     truncate_context(references.test.clone(), options.max_context);
                 out["function"] = serde_json::json!(node.name);
-                out["function_line"] = serde_json::json!(node.line);
                 out["qualified_name"] = serde_json::json!(node.qualified_name);
                 out["language"] = serde_json::to_value(node.language)?;
                 out["is_test"] = serde_json::json!(node.is_test);
@@ -801,7 +808,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                 references: hidden_references,
                 test_references: hidden_test_references,
             };
-            let mut location = colors.format_location(file, &node.name, node.line);
+            let mut location = colors.format_location(file, &node.name);
             if options.compact {
                 let compact_sections = render_compact_sections(
                     &colors,
@@ -814,10 +821,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                         test: Vec::new(),
                     },
                     options.include_test_callers,
-                    hidden_callers,
-                    hidden_test_callers,
-                    hidden_references,
-                    hidden_test_references,
+                    &hidden_context,
                 );
                 if !compact_sections.is_empty() {
                     location.push(' ');

@@ -145,40 +145,36 @@ def cache_repo_dir(root: Path, task: dict[str, Any]) -> Path:
     return root / "cache" / repo_slug(task)
 
 
-def agent_runs_dir(root: Path, task_id: str, agent: str) -> Path:
-    return root / "runs" / task_id / agent
+def run_dir(root: Path, task_id: str) -> Path:
+    return root / "runs" / task_id
 
 
-def run_dir(root: Path, task_id: str, agent: str, run_id: str) -> Path:
-    return agent_runs_dir(root, task_id, agent) / run_id
+def prompt_path(root: Path, task_id: str, condition: str) -> Path:
+    return run_dir(root, task_id) / "prompts" / f"{condition}.md"
 
 
-def run_manifest_path(root: Path, task_id: str, agent: str, run_id: str) -> Path:
-    return run_dir(root, task_id, agent, run_id) / "manifest.json"
+def worktree_dir(root: Path, task_id: str, condition: str) -> Path:
+    return run_dir(root, task_id) / "worktrees" / condition
 
 
-def prompt_path(root: Path, task_id: str, agent: str, run_id: str, condition: str) -> Path:
-    return run_dir(root, task_id, agent, run_id) / "prompts" / f"{condition}.md"
+def launch_script_path(root: Path, task_id: str, agent: str, condition: str) -> Path:
+    return run_dir(root, task_id) / f"launch_{agent}_{condition}.sh"
 
 
-def worktree_dir(root: Path, task_id: str, agent: str, run_id: str, condition: str) -> Path:
-    return run_dir(root, task_id, agent, run_id) / "worktrees" / condition
+def evaluations_root(root: Path, task_id: str, agent: str) -> Path:
+    return run_dir(root, task_id) / "evaluations" / agent
 
 
-def launch_script_path(root: Path, task_id: str, agent: str, run_id: str, condition: str) -> Path:
-    return run_dir(root, task_id, agent, run_id) / f"launch_{agent}_{condition}.sh"
-
-
-def hidden_ground_truth_path(root: Path, task_id: str, agent: str, run_id: str) -> Path:
-    return run_dir(root, task_id, agent, run_id) / "hidden" / "ground_truth.json"
+def evaluation_dir(root: Path, task_id: str, agent: str, eval_id: str) -> Path:
+    return evaluations_root(root, task_id, agent) / eval_id
 
 
 def reports_dir(root: Path) -> Path:
     return root.parent / "reports"
 
 
-def run_report_path(root: Path, task_id: str, agent: str, run_id: str) -> Path:
-    return reports_dir(root) / task_id / agent / f"{run_id}.md"
+def evaluation_report_path(root: Path, task_id: str, agent: str, eval_id: str) -> Path:
+    return reports_dir(root) / task_id / agent / f"{eval_id}.md"
 
 
 def local_tg_path(worktree: Path) -> Path:
@@ -187,14 +183,6 @@ def local_tg_path(worktree: Path) -> Path:
 
 def local_cache_root(worktree: Path) -> Path:
     return worktree / ".tracegrep-cache"
-
-
-def load_run_manifest(run_path: Path) -> dict[str, Any]:
-    return load_json(run_path / "manifest.json")
-
-
-def write_run_manifest(run_path: Path, manifest: dict[str, Any]) -> None:
-    write_json(run_path / "manifest.json", manifest)
 
 
 def run(
@@ -247,14 +235,12 @@ def remove_existing_worktree(cache_dir: Path, path: Path) -> None:
 def ensure_worktree(
     root: Path,
     task: dict[str, Any],
-    evaluated_agent: str,
-    run_id: str,
     condition: str,
     *,
     force: bool,
 ) -> Path:
     cache_dir = ensure_repo_cache(root, task)
-    path = worktree_dir(root, task["id"], evaluated_agent, run_id, condition)
+    path = worktree_dir(root, task["id"], condition)
     commit = task["ground_truth"]["pre_fix_commit"]
     if path.exists():
         if not force:
@@ -381,33 +367,33 @@ def build_prompt(task: dict[str, Any], condition: str) -> str:
     return "\n\n".join(parts) + "\n"
 
 
-def build_run_readme(task: dict[str, Any], root: Path, evaluated_agent: str, run_id: str) -> str:
-    base = run_dir(root, task["id"], evaluated_agent, run_id)
+def build_run_readme(task: dict[str, Any], root: Path) -> str:
+    base = run_dir(root, task["id"])
     lines = [
-        f"# {task['id']} / {evaluated_agent} / {run_id}",
+        f"# {task['id']}",
         "",
         f"- Repo: {task['repo']['name']}",
         f"- License: {task['repo']['license']}",
         f"- Language: {task['repo']['language']}",
         f"- Issue: {task['issue']['url']}",
         f"- Hidden PR ground truth: {task['ground_truth']['pr_url']}",
-        f"- Run ID: {run_id}",
         "",
         "Launchers:",
     ]
-    for condition in SUPPORTED_CONDITIONS:
-        script = launch_script_path(root, task["id"], evaluated_agent, run_id, condition)
-        lines.append(f"- {script.name}")
+    for agent in SUPPORTED_AGENTS:
+        for condition in SUPPORTED_CONDITIONS:
+            script = launch_script_path(root, task["id"], agent, condition)
+            lines.append(f"- {script.name}")
     lines.extend(
         [
             "",
             "Prompts:",
-            f"- {prompt_path(root, task['id'], evaluated_agent, run_id, 'control')}",
-            f"- {prompt_path(root, task['id'], evaluated_agent, run_id, 'tg')}",
+            f"- {prompt_path(root, task['id'], 'control')}",
+            f"- {prompt_path(root, task['id'], 'tg')}",
             "",
             "Worktrees:",
-            f"- {worktree_dir(root, task['id'], evaluated_agent, run_id, 'control')}",
-            f"- {worktree_dir(root, task['id'], evaluated_agent, run_id, 'tg')}",
+            f"- {worktree_dir(root, task['id'], 'control')}",
+            f"- {worktree_dir(root, task['id'], 'tg')}",
             "",
             "tg condition environment additions:",
             "- `.codex/skills/tracegrep/` copied from this repo",
@@ -415,17 +401,17 @@ def build_run_readme(task: dict[str, Any], root: Path, evaluated_agent: str, run
             "- `.eval-bin/tg` copied from the host `tg` binary so the workspace sandbox can execute it",
             "- `.tracegrep-cache/` used via `TRACEGREP_CACHE_DIR` to keep cache writes inside the worktree",
             "",
-            "Run flow:",
-            "- `judge` creates blind comparison artifacts in this run directory",
+            "Evaluation flow:",
+            "- `judge` creates blind comparison artifacts under `evaluations/<agent>/<eval-id>/`",
             "- `publish` pushes both condition snapshots to the GitHub fork under `btucker`",
-            "- `report` renders or refreshes a markdown report for the run",
+            "- `report` renders or refreshes a markdown report for the evaluation",
         ]
     )
     return "\n".join(lines) + "\n"
 
 
-def build_launcher_script(task: dict[str, Any], root: Path, agent: str, run_id: str, condition: str) -> str:
-    base = run_dir(root, task["id"], agent, run_id)
+def build_launcher_script(task: dict[str, Any], root: Path, agent: str, condition: str) -> str:
+    base = run_dir(root, task["id"])
     prompt_file = base / "prompts" / f"{condition}.md"
     worktree = base / "worktrees" / condition
     tg_path = local_tg_path(worktree)
@@ -490,16 +476,17 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, run_id: 
     return "\n".join(lines) + "\n"
 
 
-def prepare_run(root: Path, task: dict[str, Any], *, evaluated_agent: str, run_id: str, force: bool) -> None:
-    base = run_dir(root, task["id"], evaluated_agent, run_id)
+def prepare_task(root: Path, task: dict[str, Any], *, force: bool) -> None:
+    ensure_root(root)
+    base = run_dir(root, task["id"])
     (base / "prompts").mkdir(parents=True, exist_ok=True)
     (base / "hidden").mkdir(parents=True, exist_ok=True)
 
     for condition in SUPPORTED_CONDITIONS:
-        worktree = ensure_worktree(root, task, evaluated_agent, run_id, condition, force=force)
+        worktree = ensure_worktree(root, task, condition, force=force)
         configure_condition_environment(worktree, condition)
         prompt = build_prompt(task, condition)
-        prompt_path(root, task["id"], evaluated_agent, run_id, condition).write_text(prompt)
+        prompt_path(root, task["id"], condition).write_text(prompt)
 
     hidden_payload = {
         "task_id": task["id"],
@@ -508,18 +495,14 @@ def prepare_run(root: Path, task: dict[str, Any], *, evaluated_agent: str, run_i
         "ground_truth": task["ground_truth"],
         "evaluation_focus": task["evaluation_focus"],
     }
-    write_json(hidden_ground_truth_path(root, task["id"], evaluated_agent, run_id), hidden_payload)
-    (base / "README.md").write_text(build_run_readme(task, root, evaluated_agent, run_id))
+    write_json(base / "hidden" / "ground_truth.json", hidden_payload)
+    (base / "README.md").write_text(build_run_readme(task, root))
 
-    for condition in SUPPORTED_CONDITIONS:
-        script_path = launch_script_path(root, task["id"], evaluated_agent, run_id, condition)
-        script_path.write_text(build_launcher_script(task, root, evaluated_agent, run_id, condition))
-        os.chmod(script_path, 0o755)
-
-    manifest = load_run_manifest(base)
-    for condition in SUPPORTED_CONDITIONS:
-        manifest["variants"][condition]["prepared"] = True
-    write_run_manifest(base, manifest)
+    for agent in SUPPORTED_AGENTS:
+        for condition in SUPPORTED_CONDITIONS:
+            script_path = launch_script_path(root, task["id"], agent, condition)
+            script_path.write_text(build_launcher_script(task, root, agent, condition))
+            os.chmod(script_path, 0o755)
 
 
 def cmd_list(tasks: dict[str, dict[str, Any]]) -> int:
@@ -548,31 +531,11 @@ def cmd_show(tasks: dict[str, dict[str, Any]], task_id: str) -> int:
     return 0
 
 
-def cmd_list_runs(
-    tasks: dict[str, dict[str, Any]],
-    task_ids: list[str],
-    root: Path,
-    *,
-    evaluated_agent: str | None,
-) -> int:
+def cmd_prepare(tasks: dict[str, dict[str, Any]], task_ids: list[str], root: Path, force: bool) -> int:
     selected = task_ids or list(tasks.keys())
     for task_id in selected:
-        agents = [evaluated_agent] if evaluated_agent else list(SUPPORTED_AGENTS)
-        for agent in agents:
-            if agent is None:
-                continue
-            base = agent_runs_dir(root, task_id, agent)
-            if not base.exists():
-                continue
-            for run_path in sorted(path for path in base.iterdir() if path.is_dir()):
-                manifest_path = run_path / "manifest.json"
-                if not manifest_path.exists():
-                    continue
-                manifest = load_run_manifest(run_path)
-                print(
-                    f"{task_id}\t{agent}\t{run_path.name}\t{derive_run_status(run_path, manifest)}\t"
-                    f"{manifest['created_at']}"
-                )
+        prepare_task(root, tasks[task_id], force=force)
+        print(f"prepared {task_id} at {run_dir(root, task_id)}")
     return 0
 
 
@@ -582,30 +545,22 @@ def cmd_launch(
     root: Path,
     *,
     agent: str,
-    run_id: str,
     condition: str,
+    prepare: bool,
+    force: bool,
     extra_args: list[str],
 ) -> int:
     task = tasks[task_id]
-    run_path = resolve_run_dir(root, task_id, agent, run_id)
-    script = launch_script_path(root, task_id, agent, run_id, condition)
+    if prepare:
+        prepare_task(root, task, force=force)
+    script = launch_script_path(root, task_id, agent, condition)
     if not script.exists():
         raise SystemExit(
-            f"{script} does not exist. Create the run with `run-task` before launching it."
+            f"{script} does not exist. Run `uv run eval/benchmark.py prepare {task_id}` first."
         )
-    manifest = load_run_manifest(run_path)
-    if manifest["task_id"] != task["id"] or manifest["evaluated_agent"] != agent:
-        raise SystemExit(f"Run {run_id} does not match task {task_id} agent {agent}.")
-    launch_args = list(extra_args) if extra_args else list(manifest.get("build_args", []))
-    command = [str(script), *launch_args]
+    command = [str(script), *extra_args]
     print("launching:", " ".join(shlex.quote(part) for part in command))
     completed = subprocess.run(command)
-    variant_state = manifest["variants"][condition]
-    variant_state["launched"] = completed.returncode == 0
-    variant_state["last_launch_at"] = datetime.now(timezone.utc).isoformat()
-    variant_state["last_exit_code"] = completed.returncode
-    variant_state["last_args"] = launch_args
-    write_run_manifest(run_path, manifest)
     return completed.returncode
 
 
@@ -629,117 +584,31 @@ def forwarded_build_args(extra_args: list[str], agent_model: str | None) -> list
     return ["--model", agent_model, *extra_args]
 
 
-def new_run_id() -> str:
+def new_eval_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def new_run_manifest(
-    *,
-    task: dict[str, Any],
-    evaluated_agent: str,
-    run_id: str,
-    agent_model: str | None,
-    build_args: list[str],
-) -> dict[str, Any]:
-    return {
-        "run_id": run_id,
-        "task_id": task["id"],
-        "evaluated_agent": evaluated_agent,
-        "agent_model": agent_model,
-        "build_args": list(build_args),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "variants": {
-            condition: {
-                "prepared": False,
-                "launched": False,
-                "last_launch_at": None,
-                "last_exit_code": None,
-                "last_args": [],
-            }
-            for condition in SUPPORTED_CONDITIONS
-        },
-        "judge": {
-            "completed": False,
-            "judge_agent": None,
-            "judge_model": None,
-            "completed_at": None,
-        },
-        "publish": {
-            "published": False,
-            "published_at": None,
-        },
-    }
-
-
-def create_run(
-    root: Path,
-    task: dict[str, Any],
-    *,
-    evaluated_agent: str,
-    run_id: str,
-    agent_model: str | None,
-    build_args: list[str],
-    force: bool,
-) -> Path:
-    ensure_root(root)
-    path = run_dir(root, task["id"], evaluated_agent, run_id)
-    if path.exists():
-        if not force:
-            raise SystemExit(f"Run {run_id} already exists at {path}")
-        shutil.rmtree(path)
-    path.mkdir(parents=True, exist_ok=False)
-    write_run_manifest(
-        path,
-        new_run_manifest(
-            task=task,
-            evaluated_agent=evaluated_agent,
-            run_id=run_id,
-            agent_model=agent_model,
-            build_args=build_args,
-        ),
-    )
-    return path
-
-
-def latest_run_dir(root: Path, task_id: str, agent: str, *, require_judgment: bool = False) -> Path:
-    base = agent_runs_dir(root, task_id, agent)
+def latest_eval_dir(root: Path, task_id: str, agent: str) -> Path:
+    base = evaluations_root(root, task_id, agent)
     if not base.exists():
         raise SystemExit(
-            f"No runs found for {task_id} agent {agent}. Run `run-task` first."
+            f"No evaluations found for {task_id} agent {agent}. Run `judge` first."
         )
     entries = sorted(path for path in base.iterdir() if path.is_dir())
-    if require_judgment:
-        entries = [path for path in entries if (path / "judgment.json").exists()]
     if not entries:
-        if require_judgment:
-            raise SystemExit(f"No judged runs found for {task_id} agent {agent}.")
-        raise SystemExit(f"No runs found for {task_id} agent {agent}.")
+        raise SystemExit(
+            f"No evaluations found for {task_id} agent {agent}. Run `judge` first."
+        )
     return entries[-1]
 
 
-def resolve_run_dir(root: Path, task_id: str, agent: str, run_id: str) -> Path:
-    path = run_dir(root, task_id, agent, run_id)
+def resolve_eval_dir(root: Path, task_id: str, agent: str, eval_id: str | None) -> Path:
+    if eval_id is None:
+        return latest_eval_dir(root, task_id, agent)
+    path = evaluation_dir(root, task_id, agent, eval_id)
     if not path.exists():
-        raise SystemExit(f"Run {run_id} does not exist for {task_id} agent {agent}.")
+        raise SystemExit(f"Evaluation {eval_id} does not exist for {task_id} agent {agent}.")
     return path
-
-
-def derive_run_status(run_path: Path, manifest: dict[str, Any] | None = None) -> str:
-    if manifest is None:
-        manifest = load_run_manifest(run_path)
-    publish_path = run_path / "publish.json"
-    if publish_path.exists():
-        publish_meta = normalize_publish_metadata(load_json(publish_path))
-        if publish_meta and publish_meta.get("published"):
-            return "published"
-    if (run_path / "judgment.json").exists():
-        return "judged"
-    variants = manifest.get("variants", {})
-    if variants and all(item.get("launched") for item in variants.values()):
-        return "launched"
-    if variants and all(item.get("prepared") for item in variants.values()):
-        return "prepared"
-    return "created"
 
 
 def stable_token(*parts: str, length: int = 12) -> str:
@@ -751,10 +620,10 @@ def build_blind_manifest(
     *,
     task_id: str,
     evaluated_agent: str,
-    run_id: str,
+    eval_id: str,
     snapshot_commits: dict[str, str],
 ) -> dict[str, Any]:
-    flip = int(stable_token(task_id, evaluated_agent, run_id, length=2), 16) % 2 == 1
+    flip = int(stable_token(task_id, evaluated_agent, eval_id, length=2), 16) % 2 == 1
     label_to_condition = {"A": "control", "B": "tg"}
     if flip:
         label_to_condition = {"A": "tg", "B": "control"}
@@ -762,17 +631,18 @@ def build_blind_manifest(
     return {
         "task_id": task_id,
         "evaluated_agent": evaluated_agent,
-        "run_id": run_id,
+        "eval_id": eval_id,
         "label_to_condition": label_to_condition,
         "condition_to_label": condition_to_label,
         "snapshot_commits": snapshot_commits,
     }
 
 
-def branch_names(task_id: str, evaluated_agent: str, run_id: str) -> dict[str, str]:
+def branch_names(task_id: str, evaluated_agent: str, eval_id: str) -> dict[str, str]:
+    opaque_id = stable_token(task_id, evaluated_agent, eval_id, length=16)
     return {
-        "control": f"runs/{task_id}/{evaluated_agent}/{run_id}/control",
-        "tg": f"runs/{task_id}/{evaluated_agent}/{run_id}/tg",
+        "control": f"benchmark/{opaque_id}/control",
+        "tg": f"benchmark/{opaque_id}/tg",
     }
 
 
@@ -870,8 +740,7 @@ def write_diff_artifacts(
     task: dict[str, Any],
     root: Path,
     evaluated_agent: str,
-    run_id: str,
-    artifact_dir: Path,
+    eval_dir: Path,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     pre_fix = task["ground_truth"]["pre_fix_commit"]
     cache_dir = ensure_repo_cache(root, task)
@@ -879,28 +748,28 @@ def write_diff_artifacts(
     summaries: dict[str, Any] = {}
 
     for condition in SUPPORTED_CONDITIONS:
-        worktree = worktree_dir(root, task["id"], evaluated_agent, run_id, condition)
+        worktree = worktree_dir(root, task["id"], condition)
         if not worktree.exists():
             raise SystemExit(
-                f"Worktree {worktree} does not exist. Create the run with `run-task` first."
+                f"Worktree {worktree} does not exist. Run `uv run eval/benchmark.py prepare {task['id']}` first."
             )
         snapshot = snapshot_worktree_commit(
             worktree,
             pre_fix,
-            f"Benchmark snapshot for {task['id']} {evaluated_agent} {condition} {run_id}",
+            f"Benchmark snapshot for {task['id']} {evaluated_agent} {condition} {eval_dir.name}",
         )
         snapshot_commits[condition] = snapshot
         diff = git_diff(worktree, pre_fix, snapshot)
         summary = diff_file_summary(worktree, pre_fix, snapshot)
-        write_text(artifact_dir / f"{condition}.diff", diff)
-        write_json(artifact_dir / f"{condition}_files.json", summary)
+        write_text(eval_dir / f"{condition}.diff", diff)
+        write_json(eval_dir / f"{condition}_files.json", summary)
         summaries[condition] = summary
 
     ground_truth_commit = task["ground_truth"]["merge_commit"]
     ground_truth_diff = git_diff(cache_dir, pre_fix, ground_truth_commit)
     ground_truth_summary = diff_file_summary(cache_dir, pre_fix, ground_truth_commit)
-    write_text(artifact_dir / "ground_truth.diff", ground_truth_diff)
-    write_json(artifact_dir / "ground_truth_files.json", ground_truth_summary)
+    write_text(eval_dir / "ground_truth.diff", ground_truth_diff)
+    write_json(eval_dir / "ground_truth_files.json", ground_truth_summary)
     summaries["ground_truth"] = ground_truth_summary
     return snapshot_commits, summaries
 
@@ -915,7 +784,7 @@ def build_judge_input(
     for label in ("A", "B"):
         condition = label_to_condition[label]
         implementations[label] = {
-            "diff_path": f"{label}.diff",
+            "diff_path": f"{condition}.diff",
             "diff": (eval_dir / f"{condition}.diff").read_text(),
             "files": load_json(eval_dir / f"{condition}_files.json"),
         }
@@ -1227,7 +1096,7 @@ def build_report_markdown(
     task: dict[str, Any],
     evaluated_agent: str,
     judge_agent: str,
-    run_id: str,
+    eval_id: str,
     judgment: dict[str, Any],
     blind_manifest: dict[str, Any],
     publish_meta: dict[str, Any] | None,
@@ -1241,9 +1110,9 @@ def build_report_markdown(
     pr_winner = reveal_winner(judgment["better_matches_pr"], blind_manifest)
     control_vs_tg = judgment["A_vs_B_differences"]
     link_section = [
-        "Publishing has not been run yet for this run.",
+        "Publishing has not been run yet for this evaluation.",
         "",
-        "Public branch publishing can contaminate future benchmarks, so publish only after the run is complete.",
+        "Public branch publishing can contaminate future benchmarks, so publish only after the evaluation is complete.",
     ]
     control_branch_link = "n/a"
     tg_branch_link = "n/a"
@@ -1290,7 +1159,7 @@ def build_report_markdown(
         - Human PR: [#{task['ground_truth']['pr_number']}]({task['ground_truth']['pr_url']})
         - Evaluated agent: `{evaluated_agent}`
         - Judge agent: `{judge_agent}`
-        - Run ID: `{run_id}`
+        - Eval ID: `{eval_id}`
         - Report path: `{report_rel}`
 
         ## Blind Verdict Summary
@@ -1341,7 +1210,7 @@ def build_matrix_entry(
     task: dict[str, Any],
     evaluated_agent: str,
     judge_agent: str,
-    run_id: str,
+    eval_id: str,
     judgment: dict[str, Any],
     blind_manifest: dict[str, Any],
     publish_meta: dict[str, Any] | None,
@@ -1358,7 +1227,7 @@ def build_matrix_entry(
         "task_id": task["id"],
         "evaluated_agent": evaluated_agent,
         "judge_agent": judge_agent,
-        "run_id": run_id,
+        "eval_id": eval_id,
         "better_matches_pr": reveal_winner(judgment["better_matches_pr"], blind_manifest),
         "better_overall": reveal_winner(judgment["better_overall"], blind_manifest),
         "confidence": judgment["confidence"],
@@ -1408,26 +1277,26 @@ def build_matrix_markdown(entries: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_report_for_run(
+def render_report_for_eval(
     *,
     task: dict[str, Any],
     evaluated_agent: str,
     judge_agent: str,
     root: Path,
-    run_path: Path,
+    eval_dir: Path,
 ) -> Path:
-    judgment = load_json(run_path / "judgment.json")
-    blind_manifest = load_json(run_path / "blind_manifest.json")
+    judgment = load_json(eval_dir / "judgment.json")
+    blind_manifest = load_json(eval_dir / "blind_manifest.json")
     publish_meta = None
-    publish_path = run_path / "publish.json"
+    publish_path = eval_dir / "publish.json"
     if publish_path.exists():
         publish_meta = normalize_publish_metadata(load_json(publish_path))
-    report_path = run_report_path(root, task["id"], evaluated_agent, run_path.name)
+    report_path = evaluation_report_path(root, task["id"], evaluated_agent, eval_dir.name)
     report = build_report_markdown(
         task=task,
         evaluated_agent=evaluated_agent,
         judge_agent=judge_agent,
-        run_id=run_path.name,
+        eval_id=eval_dir.name,
         judgment=judgment,
         blind_manifest=blind_manifest,
         publish_meta=publish_meta,
@@ -1443,65 +1312,85 @@ def cmd_judge(
     root: Path,
     *,
     evaluated_agent: str,
-    run_id: str,
     judge_agent: str,
     judge_model: str | None,
+    eval_id: str | None,
+    prepare: bool,
+    force: bool,
 ) -> int:
     task = tasks[task_id]
-    run_path = resolve_run_dir(root, task_id, evaluated_agent, run_id)
-    judgment_path = run_path / "judgment.json"
-    if judgment_path.exists():
-        raise SystemExit(f"Run {run_id} already has a judgment at {judgment_path}")
+    if prepare:
+        prepare_task(root, task, force=force)
+    eval_id_value = eval_id or new_eval_id()
+    eval_path = evaluation_dir(root, task_id, evaluated_agent, eval_id_value)
+    if eval_path.exists():
+        raise SystemExit(f"Evaluation {eval_id_value} already exists at {eval_path}")
+    eval_path.mkdir(parents=True, exist_ok=False)
     snapshot_commits, _ = write_diff_artifacts(
         task=task,
         root=root,
         evaluated_agent=evaluated_agent,
-        run_id=run_id,
-        artifact_dir=run_path,
+        eval_dir=eval_path,
     )
     blind_manifest = build_blind_manifest(
         task_id=task_id,
         evaluated_agent=evaluated_agent,
-        run_id=run_id,
+        eval_id=eval_id_value,
         snapshot_commits=snapshot_commits,
     )
-    write_json(run_path / "blind_manifest.json", blind_manifest)
-    judge_input = build_judge_input(task, blind_manifest, run_path)
-    write_json(run_path / "judge_input.json", judge_input)
+    write_json(eval_path / "blind_manifest.json", blind_manifest)
+    judge_input = build_judge_input(task, blind_manifest, eval_path)
+    write_json(eval_path / "judge_input.json", judge_input)
     prompt = build_judge_prompt(judge_input)
-    write_text(run_path / "judge_prompt.md", prompt)
-    judgment = run_judge_agent(judge_agent, prompt, cwd=run_path, judge_model=judge_model)
+    write_text(eval_path / "judge_prompt.md", prompt)
+    judgment = run_judge_agent(judge_agent, prompt, cwd=eval_path, judge_model=judge_model)
     judgment["judge_agent"] = judge_agent
     if judge_model is not None:
         judgment["judge_model"] = judge_model
-    write_json(judgment_path, judgment)
-    publish_path = run_path / "publish.json"
-    if not publish_path.exists():
-        write_json(
-            publish_path,
-            {
-                "published": False,
-                "warning": "Public branch publishing can contaminate future benchmarks. Publish only after the run is complete.",
-            },
-        )
-    manifest = load_run_manifest(run_path)
-    manifest["snapshot_commits"] = snapshot_commits
-    manifest["judge"] = {
-        "completed": True,
-        "judge_agent": judge_agent,
-        "judge_model": judge_model,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    write_run_manifest(run_path, manifest)
-    report_path = render_report_for_run(
+    write_json(eval_path / "judgment.json", judgment)
+    write_json(
+        eval_path / "publish.json",
+        {
+            "published": False,
+            "warning": "Public branch publishing can contaminate future benchmarks. Publish only after evaluation is complete.",
+        },
+    )
+    report_path = render_report_for_eval(
         task=task,
         evaluated_agent=evaluated_agent,
         judge_agent=judge_agent,
         root=root,
-        run_path=run_path,
+        eval_dir=eval_path,
     )
-    print(f"judged {task_id} run {run_id} at {run_path}")
+    print(f"judged {task_id} at {eval_path}")
     print(f"report: {report_path}")
+    return 0
+
+
+def cmd_judge_all(
+    tasks: dict[str, dict[str, Any]],
+    task_ids: list[str],
+    root: Path,
+    *,
+    evaluated_agent: str,
+    judge_agent: str,
+    judge_model: str | None,
+    prepare: bool,
+    force: bool,
+) -> int:
+    selected = task_ids or list(tasks.keys())
+    for task_id in selected:
+        cmd_judge(
+            tasks,
+            task_id,
+            root,
+            evaluated_agent=evaluated_agent,
+            judge_agent=judge_agent,
+            judge_model=judge_model,
+            eval_id=None,
+            prepare=prepare,
+            force=force,
+        )
     return 0
 
 
@@ -1559,19 +1448,19 @@ def cmd_publish(
     root: Path,
     *,
     evaluated_agent: str,
-    run_id: str,
+    eval_id: str | None,
 ) -> int:
     task = tasks[task_id]
-    run_path = resolve_run_dir(root, task_id, evaluated_agent, run_id)
-    blind_manifest = load_json(run_path / "blind_manifest.json")
+    eval_path = resolve_eval_dir(root, task_id, evaluated_agent, eval_id)
+    blind_manifest = load_json(eval_path / "blind_manifest.json")
     snapshot_commits = blind_manifest["snapshot_commits"]
     fork = ensure_fork_repo(task)
     cache_dir = ensure_repo_cache(root, task)
     remote_name = f"{DEFAULT_FORK_OWNER}-fork"
     ensure_remote(cache_dir, remote_name, fork["git_url"])
-    branches = branch_names(task_id, evaluated_agent, run_id)
+    branches = branch_names(task_id, evaluated_agent, eval_path.name)
     for condition in SUPPORTED_CONDITIONS:
-        worktree = worktree_dir(root, task_id, evaluated_agent, run_id, condition)
+        worktree = worktree_dir(root, task_id, condition)
         if not worktree.exists():
             raise SystemExit(f"Worktree missing for {condition}: {worktree}")
         run(
@@ -1616,23 +1505,32 @@ def cmd_publish(
                 branches["tg"],
             ),
         },
-        "warning": "Public branch publishing can contaminate future benchmarks. These branches should only be created after the run is complete.",
+        "warning": "Public branch publishing can contaminate future benchmarks. These branches should only be created after evaluation is complete.",
     }
-    write_json(run_path / "publish.json", publish_meta)
-    manifest = load_run_manifest(run_path)
-    manifest["publish"]["published"] = True
-    manifest["publish"]["published_at"] = publish_meta["published_at"]
-    write_run_manifest(run_path, manifest)
-    judgment = load_json(run_path / "judgment.json")
-    report_path = render_report_for_run(
+    write_json(eval_path / "publish.json", publish_meta)
+    judgment = load_json(eval_path / "judgment.json")
+    report_path = render_report_for_eval(
         task=task,
         evaluated_agent=evaluated_agent,
         judge_agent=judgment["judge_agent"],
         root=root,
-        run_path=run_path,
+        eval_dir=eval_path,
     )
-    print(f"published {task_id} run {run_id}")
+    print(f"published {task_id} evaluation {eval_path.name}")
     print(f"report: {report_path}")
+    return 0
+
+
+def cmd_publish_all(
+    tasks: dict[str, dict[str, Any]],
+    task_ids: list[str],
+    root: Path,
+    *,
+    evaluated_agent: str,
+) -> int:
+    selected = task_ids or list(tasks.keys())
+    for task_id in selected:
+        cmd_publish(tasks, task_id, root, evaluated_agent=evaluated_agent, eval_id=None)
     return 0
 
 
@@ -1642,17 +1540,17 @@ def cmd_report(
     root: Path,
     *,
     evaluated_agent: str,
-    run_id: str,
+    eval_id: str | None,
 ) -> int:
     task = tasks[task_id]
-    run_path = resolve_run_dir(root, task_id, evaluated_agent, run_id)
-    judgment = load_json(run_path / "judgment.json")
-    report_path = render_report_for_run(
+    eval_path = resolve_eval_dir(root, task_id, evaluated_agent, eval_id)
+    judgment = load_json(eval_path / "judgment.json")
+    report_path = render_report_for_eval(
         task=task,
         evaluated_agent=evaluated_agent,
         judge_agent=judgment["judge_agent"],
         root=root,
-        run_path=run_path,
+        eval_dir=eval_path,
     )
     print(f"report: {report_path}")
     return 0
@@ -1669,18 +1567,18 @@ def cmd_report_all(
     entries = []
     for task_id in selected:
         task = tasks[task_id]
-        run_path = latest_run_dir(root, task_id, evaluated_agent, require_judgment=True)
-        judgment = load_json(run_path / "judgment.json")
-        report_path = render_report_for_run(
+        eval_path = latest_eval_dir(root, task_id, evaluated_agent)
+        judgment = load_json(eval_path / "judgment.json")
+        report_path = render_report_for_eval(
             task=task,
             evaluated_agent=evaluated_agent,
             judge_agent=judgment["judge_agent"],
             root=root,
-            run_path=run_path,
+            eval_dir=eval_path,
         )
-        blind_manifest = load_json(run_path / "blind_manifest.json")
+        blind_manifest = load_json(eval_path / "blind_manifest.json")
         publish_meta = None
-        publish_path = run_path / "publish.json"
+        publish_path = eval_path / "publish.json"
         if publish_path.exists():
             maybe = normalize_publish_metadata(load_json(publish_path))
             if maybe and maybe.get("published"):
@@ -1690,7 +1588,7 @@ def cmd_report_all(
                 task=task,
                 evaluated_agent=evaluated_agent,
                 judge_agent=judgment["judge_agent"],
-                run_id=run_path.name,
+                eval_id=eval_path.name,
                 judgment=judgment,
                 blind_manifest=blind_manifest,
                 publish_meta=publish_meta,
@@ -1719,21 +1617,11 @@ def cmd_run_task(
     extra_args: list[str],
 ) -> int:
     task = tasks[task_id]
+    eval_id = new_eval_id()
     build_args = forwarded_build_args(extra_args, agent_model)
-    run_id = new_run_id()
 
-    print(f"[1/6] creating run {run_id} for {task_id}")
-    create_run(
-        root,
-        task,
-        evaluated_agent=evaluated_agent,
-        run_id=run_id,
-        agent_model=agent_model,
-        build_args=build_args,
-        force=force,
-    )
-    prepare_run(root, task, evaluated_agent=evaluated_agent, run_id=run_id, force=force)
-    print(f"run-id: {run_id}")
+    print(f"[1/6] preparing {task_id}")
+    prepare_task(root, task, force=force)
 
     for index, condition in enumerate(SUPPORTED_CONDITIONS, start=2):
         print(f"[{index}/6] launching {evaluated_agent} {condition}")
@@ -1742,8 +1630,9 @@ def cmd_run_task(
             task_id,
             root,
             agent=evaluated_agent,
-            run_id=run_id,
             condition=condition,
+            prepare=False,
+            force=False,
             extra_args=build_args,
         )
         if result != 0:
@@ -1756,9 +1645,11 @@ def cmd_run_task(
         task_id,
         root,
         evaluated_agent=evaluated_agent,
-        run_id=run_id,
         judge_agent=judge_agent,
         judge_model=judge_model,
+        eval_id=eval_id,
+        prepare=False,
+        force=False,
     )
     if result != 0:
         return result
@@ -1769,7 +1660,7 @@ def cmd_run_task(
         task_id,
         root,
         evaluated_agent=evaluated_agent,
-        run_id=run_id,
+        eval_id=eval_id,
     )
     if result != 0:
         return result
@@ -1780,7 +1671,7 @@ def cmd_run_task(
         task_id,
         root,
         evaluated_agent=evaluated_agent,
-        run_id=run_id,
+        eval_id=eval_id,
     )
 
 
@@ -1789,49 +1680,71 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("list", help="List available benchmark tasks.")
-    list_runs_parser = subparsers.add_parser("list-runs", help="List existing benchmark runs.")
-    list_runs_parser.add_argument("task_ids", nargs="*", choices=task_ids)
-    list_runs_parser.add_argument("--agent", choices=SUPPORTED_AGENTS)
-    list_runs_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
 
     show_parser = subparsers.add_parser("show", help="Show details for one task.")
     show_parser.add_argument("task_id", choices=task_ids)
 
-    launch_parser = subparsers.add_parser("launch", help="Launch one prepared variant for an existing run.")
+    prepare_parser = subparsers.add_parser("prepare", help="Prepare one or more tasks.")
+    prepare_parser.add_argument("task_ids", nargs="*", choices=task_ids)
+    prepare_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    prepare_parser.add_argument("--force", action="store_true", help="Recreate existing generated worktrees.")
+
+    launch_parser = subparsers.add_parser("launch", help="Launch a prepared task in codex or claude.")
     launch_parser.add_argument("task_id", choices=task_ids)
     launch_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
-    launch_parser.add_argument("--run-id", required=True)
-    launch_parser.add_argument("--variant", required=True, choices=SUPPORTED_CONDITIONS)
+    launch_parser.add_argument("--condition", required=True, choices=SUPPORTED_CONDITIONS)
     launch_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    launch_parser.add_argument(
+        "--prepare",
+        action="store_true",
+        help="Prepare the task before launching if needed.",
+    )
+    launch_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
 
-    judge_parser = subparsers.add_parser("judge", help="Blind-judge one run against the human PR.")
+    judge_parser = subparsers.add_parser("judge", help="Blind-judge one task against the human PR.")
     judge_parser.add_argument("task_id", choices=task_ids)
     judge_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
-    judge_parser.add_argument("--run-id", required=True)
     judge_parser.add_argument("--judge-agent", choices=SUPPORTED_AGENTS, default=None)
     judge_parser.add_argument("--judge-model")
+    judge_parser.add_argument("--eval-id")
     judge_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    judge_parser.add_argument("--prepare", action="store_true", help="Prepare the task before judging.")
+    judge_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
 
-    publish_parser = subparsers.add_parser("publish", help="Publish both variant branches for one run.")
+    judge_all_parser = subparsers.add_parser("judge-all", help="Blind-judge one or more tasks.")
+    judge_all_parser.add_argument("task_ids", nargs="*", choices=task_ids)
+    judge_all_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    judge_all_parser.add_argument("--judge-agent", choices=SUPPORTED_AGENTS, default=None)
+    judge_all_parser.add_argument("--judge-model")
+    judge_all_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    judge_all_parser.add_argument("--prepare", action="store_true", help="Prepare tasks before judging.")
+    judge_all_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
+
+    publish_parser = subparsers.add_parser("publish", help="Publish both condition branches for one evaluation.")
     publish_parser.add_argument("task_id", choices=task_ids)
     publish_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
-    publish_parser.add_argument("--run-id", required=True)
+    publish_parser.add_argument("--eval-id")
     publish_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
 
-    report_parser = subparsers.add_parser("report", help="Render the markdown report for one run.")
+    publish_all_parser = subparsers.add_parser("publish-all", help="Publish the latest evaluation for one or more tasks.")
+    publish_all_parser.add_argument("task_ids", nargs="*", choices=task_ids)
+    publish_all_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
+    publish_all_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+
+    report_parser = subparsers.add_parser("report", help="Render the markdown report for one evaluation.")
     report_parser.add_argument("task_id", choices=task_ids)
     report_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
-    report_parser.add_argument("--run-id", required=True)
+    report_parser.add_argument("--eval-id")
     report_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
 
-    report_all_parser = subparsers.add_parser("report-all", help="Render an aggregate markdown matrix from the latest judged runs.")
+    report_all_parser = subparsers.add_parser("report-all", help="Render an aggregate markdown matrix.")
     report_all_parser.add_argument("task_ids", nargs="*", choices=task_ids)
     report_all_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
     report_all_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
 
     run_task_parser = subparsers.add_parser(
         "run-task",
-        help="Run the full task flow: create a run, launch control, launch tg, judge, publish, and report.",
+        help="Run the full task flow: prepare, launch control, launch tg, judge, publish, and report.",
     )
     run_task_parser.add_argument("task_id", choices=task_ids)
     run_task_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
@@ -1839,7 +1752,7 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     run_task_parser.add_argument("--judge-agent", choices=SUPPORTED_AGENTS, default=None)
     run_task_parser.add_argument("--judge-model")
     run_task_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    run_task_parser.add_argument("--force", action="store_true", help="Overwrite an existing generated run if the run ID collides.")
+    run_task_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
 
     return parser
 
@@ -1851,10 +1764,10 @@ def main() -> int:
 
     if args.command == "list":
         return cmd_list(tasks)
-    if args.command == "list-runs":
-        return cmd_list_runs(tasks, args.task_ids, args.root, evaluated_agent=args.agent)
     if args.command == "show":
         return cmd_show(tasks, args.task_id)
+    if args.command == "prepare":
+        return cmd_prepare(tasks, args.task_ids, args.root, args.force)
     if args.command == "launch":
         if extra_args and extra_args[0] == "--":
             extra_args = extra_args[1:]
@@ -1863,8 +1776,9 @@ def main() -> int:
             args.task_id,
             args.root,
             agent=args.agent,
-            run_id=args.run_id,
-            condition=args.variant,
+            condition=args.condition,
+            prepare=args.prepare,
+            force=args.force,
             extra_args=extra_args,
         )
     if args.command == "judge":
@@ -1873,9 +1787,22 @@ def main() -> int:
             args.task_id,
             args.root,
             evaluated_agent=args.agent,
-            run_id=args.run_id,
             judge_agent=args.judge_agent or default_judge_agent(),
             judge_model=args.judge_model,
+            eval_id=args.eval_id,
+            prepare=args.prepare,
+            force=args.force,
+        )
+    if args.command == "judge-all":
+        return cmd_judge_all(
+            tasks,
+            args.task_ids,
+            args.root,
+            evaluated_agent=args.agent,
+            judge_agent=args.judge_agent or default_judge_agent(),
+            judge_model=args.judge_model,
+            prepare=args.prepare,
+            force=args.force,
         )
     if args.command == "publish":
         return cmd_publish(
@@ -1883,7 +1810,14 @@ def main() -> int:
             args.task_id,
             args.root,
             evaluated_agent=args.agent,
-            run_id=args.run_id,
+            eval_id=args.eval_id,
+        )
+    if args.command == "publish-all":
+        return cmd_publish_all(
+            tasks,
+            args.task_ids,
+            args.root,
+            evaluated_agent=args.agent,
         )
     if args.command == "report":
         return cmd_report(
@@ -1891,7 +1825,7 @@ def main() -> int:
             args.task_id,
             args.root,
             evaluated_agent=args.agent,
-            run_id=args.run_id,
+            eval_id=args.eval_id,
         )
     if args.command == "report-all":
         return cmd_report_all(

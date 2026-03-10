@@ -1,56 +1,16 @@
 # tracegrep
 
-`tracegrep` layers backtrace context on top of `rg` ([ripgrep](https://github.com/BurntSushi/ripgrep)) results. 
+`tracegrep` layers call-graph context on top of `rg` results.
+
 It exists to give coding agent instant context for how a line of code is used in the codebase. This allows the coding agent to gain a more complete understanding prior to making changes.
-Rust, Python, Typscript & Javascript are currently supported via [treesitter](https://github.com/tree-sitter/tree-sitter).
 
-This repo includes a SKILL.md & plugin wrappers for Claude Code, Codex, and Cursor.
-
-`tracegrep` maintains a mostly compatible CLI to `ripgrep`.
-
-`$ rg tool_block`
-```rust
-212:    let blocks = extract_tool_blocks(session_events);
-279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {</code></pre>
-```
-
-`$ tg tool_block`
-```rust
-src/daemon/stream.rs:append_tool_data_effects
-212:    let blocks = extract_tool_blocks(session_events);
-  Called via:
-    src/daemon/stream.rs:process_lead_output:110  (when events.get(main_lead_session_name) is Some(lead_events) && ...)
-
-src/daemon/stream.rs:extract_tool_blocks
-279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {
-  Called via:
-    src/daemon/stream.rs:append_tool_data_effects:206
-    src/daemon/stream.rs:process_agent_output:552  (when events.get(name.as_str()) is Some(coworker_events))
-```
+This repo also includes a Claude Code skill for tracegrep-aware search flow.
 
 ## Installation
 
 Note: installation differs by environment. The CLI installs with Cargo. Claude Code can also load the packaged skill via the repo's plugin metadata.
 
-### CLI (quick install)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | sh
-```
-
-This downloads the latest release binary for your platform and installs it to `~/.local/bin`. You can customize the install directory:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | INSTALL_DIR=/usr/local/bin sh
-```
-
-Or install a specific version:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | VERSION=v0.1.0 sh
-```
-
-### CLI (from source)
+### CLI
 
 Install `rg` first, then install `tracegrep` from this repo:
 
@@ -130,6 +90,45 @@ tg tool_data src tests
 tg --generate complete-zsh
 ```
 
+## Example output
+
+Searching for `validate_body` in a small repo shows the difference in
+shape immediately:
+
+<table>
+  <tr>
+    <th><code>rg -n validate_body</code></th>
+    <th><code>tg validate_body /path/to/repo</code></th>
+  </tr>
+  <tr>
+    <td valign="top">
+      <pre lang="text"><code>src/main.rs:3:    register_handler(validate_body);
+src/main.rs:8:        validate_body();
+src/main.rs:13:fn validate_body() {
+tests/integration.rs:1:fn test_validate_body() {
+tests/integration.rs:2:    validate_body();</code></pre>
+    </td>
+    <td valign="top">
+      <pre lang="text"><code>src/main.rs:main:3
+      register_handler(validate_body);
+
+src/main.rs:router:8
+          validate_body();
+  Called via:
+    src/main.rs:main:1
+
+src/main.rs:validate_body:13
+  fn validate_body() {
+  Called via:
+    src/main.rs:router:6  (when method == "POST")
+  Referenced by:
+    src/main.rs:main:1  (passed to register_handler)
+
+tests/integration.rs:1:fn test_validate_body() {
+tests/integration.rs:2:    validate_body();</code></pre>
+    </td>
+  </tr>
+</table>
 
 ## Notes
 
@@ -143,3 +142,14 @@ tg --generate complete-zsh
 - The call graph is rebuilt automatically when the relevant per-language cache is missing or its stored `HEAD` no longer matches the repo.
 - Function references passed as arguments are shown separately from direct callers.
 - The current resolver is heuristic and language-local; it does not attempt import-aware or type-aware cross-file analysis.
+
+## Claude Code skill
+
+The repository ships a Claude Code skill under `skills/tracegrep/`.
+
+The `tracegrep` skill tells the agent to:
+
+- prefer tracegrep-aware search instead of raw shell `rg`
+- use `--json` only when structured output is needed
+- fall back to `tracegrep` or `cargo run --` if needed
+- use plain `rg` or `grep` only when the user explicitly asks for them or the search target is outside tracegrep's model
