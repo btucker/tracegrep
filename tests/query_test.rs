@@ -877,15 +877,12 @@ fn test_build_index_prewarms_cache() {
         String::from_utf8(first.stderr).unwrap()
     );
     let first_stdout = String::from_utf8(first.stdout).unwrap();
-    let first_stderr = String::from_utf8(first.stderr).unwrap();
     assert!(
         first_stdout.contains("Built index"),
         "stdout:\n{first_stdout}"
     );
-    assert!(
-        first_stderr.contains("Building Rust graph"),
-        "stderr:\n{first_stderr}"
-    );
+    // Progress message is delayed by 1 second and suppressed for fast builds,
+    // so we don't assert its presence here.
 
     let second = run_tracegrep_with_cache(dir.path(), cache_dir.path(), &["--build-index"]);
     assert!(

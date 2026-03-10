@@ -3,6 +3,8 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,6 +17,32 @@ use crate::timing::TimingCollector;
 const CACHE_DIR_ENV: &str = "TRACEGREP_CACHE_DIR";
 const CACHE_DIR: &str = ".cache/tracegrep";
 const SCHEMA_VERSION: u32 = 5;
+
+/// A guard that prints a message to stderr after a delay.
+/// If dropped before the delay elapses, the message is suppressed.
+struct DelayedMessage {
+    cancel: Arc<AtomicBool>,
+}
+
+impl DelayedMessage {
+    fn new(message: String, delay: std::time::Duration) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_clone = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            if !cancel_clone.load(Ordering::Relaxed) {
+                eprintln!("{message}");
+            }
+        });
+        Self { cancel }
+    }
+}
+
+impl Drop for DelayedMessage {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadGraphMode {
@@ -580,7 +608,10 @@ fn full_rebuild_language(
     current_files: &BTreeMap<String, PathBuf>,
     timings: &mut TimingCollector,
 ) -> anyhow::Result<LanguageLoadResult> {
-    eprintln!("Building {} graph...", language.display_name());
+    let _progress = DelayedMessage::new(
+        format!("Building {} graph...", language.display_name()),
+        std::time::Duration::from_secs(1),
+    );
     let files = build_all_artifacts(current_files, include_tests, language)?;
     let graph = timings.measure("graph_rebuild", || {
         codepaths::build_graph_from_artifacts(&files)
@@ -601,6 +632,7 @@ fn full_rebuild_language(
             files,
         },
     )?;
+    drop(_progress);
 
     Ok(LanguageLoadResult {
         graph,
@@ -649,6 +681,16 @@ fn incremental_rebuild_language(
         );
     }
 
+    let _progress = DelayedMessage::new(
+        format!(
+            "Incrementally rebuilding {} graph ({} changed file{})",
+            language.display_name(),
+            changed_files.len(),
+            if changed_files.len() == 1 { "" } else { "s" }
+        ),
+        std::time::Duration::from_secs(1),
+    );
+
     let mut parser = codepaths::new_parser(language)?;
 
     for removed in state
@@ -677,12 +719,7 @@ fn incremental_rebuild_language(
     });
     let state_meta = write_state(repo_path, include_tests, language, &state)?;
     write_graph(repo_path, include_tests, language, &graph)?;
-    eprintln!(
-        "Incrementally rebuilding {} graph ({} changed file{})",
-        language.display_name(),
-        changed_files.len(),
-        if changed_files.len() == 1 { "" } else { "s" }
-    );
+    drop(_progress);
 
     Ok(LanguageLoadResult {
         graph,
