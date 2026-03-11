@@ -387,8 +387,14 @@ fn target() {
         String::from_utf8(output.stderr).unwrap()
     );
     // The location header "src/main.rs:target" should appear exactly once
-    let header_count = stdout.lines().filter(|l| l.contains("src/main.rs") && l.contains("target") && !l.contains("needle")).count();
-    assert_eq!(header_count, 1, "header should appear once, stdout:\n{stdout}");
+    let header_count = stdout
+        .lines()
+        .filter(|l| l.contains("src/main.rs") && l.contains("target") && !l.contains("needle"))
+        .count();
+    assert_eq!(
+        header_count, 1,
+        "header should appear once, stdout:\n{stdout}"
+    );
     // "Called by:" should appear exactly once
     assert_eq!(
         stdout.matches("Called by:").count(),
@@ -422,8 +428,15 @@ fn target() {
         String::from_utf8(output.stderr).unwrap()
     );
     // The compact header line with [Called by:] should appear exactly once
-    let header_lines: Vec<_> = stdout.lines().filter(|l| l.contains("src/main.rs") && l.contains("target")).collect();
-    assert_eq!(header_lines.len(), 1, "compact header should appear once, stdout:\n{stdout}");
+    let header_lines: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.contains("src/main.rs") && l.contains("target"))
+        .collect();
+    assert_eq!(
+        header_lines.len(),
+        1,
+        "compact header should appear once, stdout:\n{stdout}"
+    );
     // Both match lines should be present
     assert!(stdout.contains("needle_one"), "stdout:\n{stdout}");
     assert!(stdout.contains("needle_two"), "stdout:\n{stdout}");

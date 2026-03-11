@@ -795,11 +795,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
         if same_function {
             // Merge into existing block: add gap context lines and the match line
             let block = current_block.as_mut().unwrap();
-            let max_existing = block
-                .code_lines
-                .last()
-                .map(|l| l.line_number)
-                .unwrap_or(0);
+            let max_existing = block.code_lines.last().map(|l| l.line_number).unwrap_or(0);
             for ctx in &pending_context_lines {
                 if ctx.line_number > max_existing
                     && ctx.line_number < line_number
@@ -902,8 +898,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                                 .push(format!("    {}", colors.format_reference(reference)));
                         }
                     }
-                    if let Some(summary) =
-                        summarize_hidden_context("reference", hidden_references)
+                    if let Some(summary) = summarize_hidden_context("reference", hidden_references)
                     {
                         detail_lines.push(format!("    {}", colors.dim(&summary)));
                     }
