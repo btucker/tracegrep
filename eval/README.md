@@ -41,7 +41,7 @@ The build prompts also explicitly forbid networked or baseline-changing git comm
 
 The outputs should be read as comparative judgments, not absolute truth. The score columns and winners come from an LLM judge, and the per-task markdown reports contain the qualitative rationale behind the matrix. The accepted PR is treated as a reference and can rank above both benchmark implementations in the three-way ranking.
 
-In normal use, `run-task` is the main entrypoint. It runs the whole benchmark flow for one task: prepare, launch `control`, launch `tg`, judge, publish, and render the report. The lower-level commands are still useful for inspection, retries, and debugging, but they are not the primary workflow.
+In normal use, `run-task` is the main entrypoint. It runs the whole benchmark flow for one task: prepare, launch `control`, launch `tg`, judge, publish, and render the report. By default it runs both a Claude judge and a Codex judge against the same blinded evaluation artifacts, then renders a combined report and refreshes the matrix with both rows. The lower-level commands are still useful for inspection, retries, and debugging, but they are not the primary workflow.
 
 ## Finding And Adding Tasks
 
@@ -97,7 +97,8 @@ uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent codex
 uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent claude --agent-model sonnet --judge-agent codex --judge-model gpt-5
 ```
 
-`run-task` is the default high-level workflow. It prepares both worktrees, runs both conditions, judges the result, optionally publishes branches, and writes the markdown report.
+`run-task` is the default high-level workflow. It prepares both worktrees, runs both conditions, judges the result with both Claude and Codex by default, optionally publishes branches, writes the markdown report, and refreshes the aggregate `eval/reports/matrix.md` for that agent.
+The generated build launches are headless and exit on completion; they do not open an interactive Codex or Claude session window.
 
 ### Inspect current state
 
@@ -153,6 +154,8 @@ Launch a prepared run with Claude:
 uv run eval/benchmark.py launch storybook-hide-toolbar-docs --agent claude --condition control
 ```
 
+These launchers run non-interactively with tool access enabled so the agent can edit files and use the shell, but the process exits when the task is done.
+
 Judge one task after the agent runs finish:
 
 ```bash
@@ -173,7 +176,7 @@ uv run eval/benchmark.py report storybook-hide-toolbar-docs --agent codex
 uv run eval/benchmark.py report-all --agent codex
 ```
 
-`report-all` skips tasks whose latest run is missing or unjudged and prints those skipped runs before writing the aggregate matrix.
+`report-all` skips tasks whose latest run is missing or unjudged and prints both the included judgments and skipped runs before writing the aggregate matrix.
 
 Pass extra flags to the underlying CLI after `--`:
 
@@ -186,7 +189,8 @@ Model selection notes:
 
 - Arguments after `--` are passed only to the build runs.
 - `--agent-model` applies to the build runs in `run-task`.
-- `--judge-model` applies only to the blind judge run.
+- `run-task` uses both Claude and Codex judges by default. Pass one `--judge-agent` to restrict it to a single judge, or repeat `--judge-agent` to choose a subset.
+- `--judge-model` applies only when a single judge is selected for `run-task`, or when using the lower-level `judge` / `judge-all` commands.
 - If `--judge-model` is omitted, the judge CLI uses its default model.
 - `run-task` rejects using both `--agent-model` and a forwarded `--model`/`-m` after `--` at the same time.
 
@@ -225,7 +229,7 @@ Judging a task creates:
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/A_repo/`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/B_repo/`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/accepted_pr_repo/`
-- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judgment.json`
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judgments/<judge-agent>.json`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/publish.json`
 
 The default `runs` view shows one row per `evaluations/<agent>/<eval-id>/` directory, including:
@@ -255,7 +259,7 @@ For the `tg` worktree only, `prepare` also creates:
 
 ## Notes
 
-- The default judge agent comes from `TRACEGREP_EVAL_JUDGE_AGENT` and falls back to `claude`.
+- The default judge agent from `TRACEGREP_EVAL_JUDGE_AGENT` still applies to the lower-level `judge` and `judge-all` commands. `run-task` now defaults to both Claude and Codex judges.
 - `publish` uses `gh` to detect or create forks under `btucker`, then pushes both branches with opaque benchmark branch names.
 - Public publishing can leak benchmark solutions into future search. Treat published branches as post-hoc artifacts, not inputs to new runs.
 - The markdown reports are meant to be committed back into this repo; the disposable run artifacts stay under `eval/workspaces/`.

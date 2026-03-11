@@ -610,9 +610,9 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
     tg_path = local_tg_path(worktree)
     cache_root = local_cache_root(worktree)
     if agent == "codex":
-        command = 'exec codex --full-auto "$@" "$(cat "$PROMPT_FILE")"'
+        command = 'exec codex exec --full-auto --skip-git-repo-check "$@" - < "$PROMPT_FILE"'
     elif agent == "claude":
-        command = 'exec claude "$@" "$(cat "$PROMPT_FILE")"'
+        command = 'exec claude -p --permission-mode bypassPermissions --tools default "$@" "$(cat "$PROMPT_FILE")"'
     else:
         raise ValueError(f"unsupported agent: {agent}")
     preflight_lines: list[str] = []
@@ -820,6 +820,51 @@ def load_publish_meta(eval_dir: Path) -> dict[str, Any] | None:
     return load_json(path)
 
 
+def judgments_dir(eval_dir: Path) -> Path:
+    return eval_dir / "judgments"
+
+
+def judgment_path(eval_dir: Path, judge_agent: str) -> Path:
+    return judgments_dir(eval_dir) / f"{judge_agent}.json"
+
+
+def ordered_judge_agents(judge_agents: list[str]) -> list[str]:
+    preferred_order = {agent: index for index, agent in enumerate(("claude", "codex"))}
+    return sorted(judge_agents, key=lambda agent: (preferred_order.get(agent, len(preferred_order)), agent))
+
+
+def load_judgments(eval_dir: Path) -> dict[str, dict[str, Any]]:
+    judgments: dict[str, dict[str, Any]] = {}
+    legacy_path = eval_dir / "judgment.json"
+    if legacy_path.exists():
+        legacy = load_json(legacy_path)
+        judge_agent = legacy.get("judge_agent", DEFAULT_JUDGE_AGENT)
+        judgments[judge_agent] = legacy
+    directory = judgments_dir(eval_dir)
+    if directory.exists():
+        for path in sorted(directory.glob("*.json")):
+            payload = load_json(path)
+            judge_agent = payload.get("judge_agent", path.stem)
+            judgments[judge_agent] = payload
+    return {agent: judgments[agent] for agent in ordered_judge_agents(list(judgments))}
+
+
+def load_judgment(eval_dir: Path, judge_agent: str) -> dict[str, Any]:
+    judgments = load_judgments(eval_dir)
+    if judge_agent not in judgments:
+        raise SystemExit(f"Evaluation {eval_dir.name} does not have a {judge_agent} judgment")
+    return judgments[judge_agent]
+
+
+def write_judgment(eval_dir: Path, judgment: dict[str, Any]) -> None:
+    judge_agent = judgment["judge_agent"]
+    write_json(judgment_path(eval_dir, judge_agent), judgment)
+
+
+def has_any_judgments(eval_dir: Path) -> bool:
+    return bool(load_judgments(eval_dir))
+
+
 def describe_variant_status(eval_dir: Path, condition: str) -> str:
     publish_meta = load_publish_meta(eval_dir)
     if publish_meta and publish_meta.get("published"):
@@ -836,7 +881,7 @@ def describe_run_status(eval_dir: Path, control_status: str, tg_status: str) -> 
     publish_meta = load_publish_meta(eval_dir)
     if publish_meta and publish_meta.get("published"):
         return "published"
-    if (eval_dir / "judgment.json").exists():
+    if has_any_judgments(eval_dir):
         return "judged"
     if control_status != "-" or tg_status != "-":
         return "snapshotted"
@@ -922,8 +967,6 @@ def initialize_eval_run(
 
 
 def ensure_existing_eval_can_be_judged(eval_dir: Path) -> dict[str, Any]:
-    if (eval_dir / "judgment.json").exists():
-        raise SystemExit(f"Evaluation {eval_dir.name} already has judgment.json")
     blind_manifest_path = eval_dir / "blind_manifest.json"
     if not blind_manifest_path.exists():
         raise SystemExit(
@@ -1110,6 +1153,22 @@ def default_judge_agent() -> str:
             "TRACEGREP_EVAL_JUDGE_AGENT must be one of: " + ", ".join(SUPPORTED_AGENTS)
         )
     return value
+
+
+def default_run_task_judge_agents(judge_agents: list[str] | None, judge_model: str | None) -> list[str]:
+    if judge_agents:
+        resolved = ordered_judge_agents(list(dict.fromkeys(judge_agents)))
+        if judge_model is not None and len(resolved) != 1:
+            raise SystemExit(
+                "Use `--judge-model` only when `run-task` is configured with a single `--judge-agent`."
+            )
+        return resolved
+    if judge_model is not None:
+        raise SystemExit(
+            "Default `run-task` now uses both claude and codex judges. "
+            "Pass `--judge-agent` to select a single judge before using `--judge-model`."
+        )
+    return ["claude", "codex"]
 
 
 def forwarded_build_args(extra_args: list[str], agent_model: str | None) -> list[str]:
@@ -2325,17 +2384,12 @@ def format_bullets(items: list[str]) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
-def build_report_markdown(
+def build_report_judge_section(
     *,
-    task: dict[str, Any],
-    evaluated_agent: str,
     judge_agent: str,
-    eval_id: str,
     judgment: dict[str, Any],
     blind_manifest: dict[str, Any],
-    publish_meta: dict[str, Any] | None,
-    report_path: Path | None = None,
-) -> str:
+) -> list[str]:
     scores = condition_scores(judgment, blind_manifest)
     differences_vs_pr = condition_list(judgment, blind_manifest, "_vs_pr_differences")
     strengths = condition_nested_list(judgment, blind_manifest, "notable_strengths")
@@ -2347,6 +2401,74 @@ def build_report_markdown(
         f"`{reveal_ranking_item(label, blind_manifest)}`" for label in overall_ranking_labels(judgment)
     )
     control_vs_tg = judgment["A_vs_B_differences"]
+    score_rows = "\n".join(
+        [
+            "| Condition | PR Alignment | Reuse Alignment | Duplication Risk | Test Alignment |",
+            "| --- | ---: | ---: | ---: | ---: |",
+            f"| control | {scores['control']['pr_alignment']} | {scores['control']['reuse_alignment']} | {scores['control']['duplication_risk']} | {scores['control']['test_alignment']} |",
+            f"| tg | {scores['tg']['pr_alignment']} | {scores['tg']['reuse_alignment']} | {scores['tg']['duplication_risk']} | {scores['tg']['test_alignment']} |",
+        ]
+    )
+    return [
+        f"## Judge Result: {judge_agent}",
+        "",
+        "### Blind Verdict Summary",
+        f"- Better matches the accepted PR: `{pr_winner}`",
+        f"- Better overall (`control` vs `tg`): `{overall_winner}`",
+        f"- Best of all three: `{best_three}`",
+        f"- Overall ranking: {overall_ranking}",
+        f"- Judge confidence: `{judgment['confidence']}`",
+        "",
+        "### Score Table",
+        score_rows,
+        "",
+        "### Control vs Human PR",
+        "#### Key differences",
+        format_bullets(differences_vs_pr["control"]),
+        "",
+        "#### Strengths",
+        format_bullets(strengths["control"]),
+        "",
+        "#### Risks",
+        format_bullets(risks["control"]),
+        "",
+        "### TG vs Human PR",
+        "#### Key differences",
+        format_bullets(differences_vs_pr["tg"]),
+        "",
+        "#### Strengths",
+        format_bullets(strengths["tg"]),
+        "",
+        "#### Risks",
+        format_bullets(risks["tg"]),
+        "",
+        "### Control vs TG",
+        format_bullets(control_vs_tg),
+        "",
+        "### Final Summary",
+        judgment["summary"],
+        "",
+    ]
+
+
+def build_report_markdown(
+    *,
+    task: dict[str, Any],
+    evaluated_agent: str,
+    eval_id: str,
+    judge_agent: str | None = None,
+    judgment: dict[str, Any] | None = None,
+    judgments: dict[str, dict[str, Any]] | None = None,
+    blind_manifest: dict[str, Any],
+    publish_meta: dict[str, Any] | None,
+    report_path: Path | None = None,
+) -> str:
+    if judgments is None:
+        if judge_agent is None or judgment is None:
+            raise ValueError("Either judgments or judge_agent + judgment must be provided")
+        judgments = {judge_agent: judgment}
+
+    judge_agents = ordered_judge_agents(list(judgments))
     link_section = [
         "Publishing has not been run yet for this evaluation.",
         "",
@@ -2379,71 +2501,55 @@ def build_report_markdown(
             f"| B | {blind_manifest['label_to_condition']['B']} |",
         ]
     )
-    score_rows = "\n".join(
-        [
-            "| Condition | PR Alignment | Reuse Alignment | Duplication Risk | Test Alignment |",
-            "| --- | ---: | ---: | ---: | ---: |",
-            f"| control | {scores['control']['pr_alignment']} | {scores['control']['reuse_alignment']} | {scores['control']['duplication_risk']} | {scores['control']['test_alignment']} |",
-            f"| tg | {scores['tg']['pr_alignment']} | {scores['tg']['reuse_alignment']} | {scores['tg']['duplication_risk']} | {scores['tg']['test_alignment']} |",
-        ]
-    )
-    return "\n".join(
-        [
-            f"# Benchmark Report: {task['id']}",
-            "",
-            "## Task Metadata",
-            f"- Repo: {task['repo']['name']}",
-            f"- Issue: [#{task['issue']['number']}]({task['issue']['url']}) {task['issue']['title']}",
-            f"- Human PR: [#{task['ground_truth']['pr_number']}]({task['ground_truth']['pr_url']})",
-            f"- Evaluated agent: `{evaluated_agent}`",
-            f"- Judge agent: `{judge_agent}`",
-            f"- Eval ID: `{eval_id}`",
-            f"- Report path: `{report_rel}`",
-            "",
-            "## Blind Verdict Summary",
-            f"- Better matches the accepted PR: `{pr_winner}`",
-            f"- Better overall (`control` vs `tg`): `{overall_winner}`",
-            f"- Best of all three: `{best_three}`",
-            f"- Overall ranking: {overall_ranking}",
-            f"- Judge confidence: `{judgment['confidence']}`",
-            "",
-            "## Blind Mapping",
-            mapping_rows,
-            "",
-            "## Score Table",
-            score_rows,
-            "",
-            "## Control vs Human PR",
-            "### Key differences",
-            format_bullets(differences_vs_pr["control"]),
-            "",
-            "### Strengths",
-            format_bullets(strengths["control"]),
-            "",
-            "### Risks",
-            format_bullets(risks["control"]),
-            "",
-            "## TG vs Human PR",
-            "### Key differences",
-            format_bullets(differences_vs_pr["tg"]),
-            "",
-            "### Strengths",
-            format_bullets(strengths["tg"]),
-            "",
-            "### Risks",
-            format_bullets(risks["tg"]),
-            "",
-            "## Control vs TG",
-            format_bullets(control_vs_tg),
-            "",
-            "## Published GitHub Links",
-            "\n".join(link_section),
-            "",
-            "## Final Summary",
-            judgment["summary"],
-            "",
-        ]
-    )
+    summary_rows = [
+        "| Judge | Better vs PR | Better overall (control vs tg) | Best of all three | Confidence |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for agent in judge_agents:
+        judge_payload = judgments[agent]
+        summary_rows.append(
+            "| "
+            + " | ".join(
+                [
+                    agent,
+                    reveal_winner(judge_payload["better_matches_pr"], blind_manifest),
+                    reveal_winner(judge_payload["better_overall"], blind_manifest),
+                    best_of_all_three(judge_payload, blind_manifest),
+                    judge_payload["confidence"],
+                ]
+            )
+            + " |"
+        )
+
+    lines = [
+        f"# Benchmark Report: {task['id']}",
+        "",
+        "## Task Metadata",
+        f"- Repo: {task['repo']['name']}",
+        f"- Issue: [#{task['issue']['number']}]({task['issue']['url']}) {task['issue']['title']}",
+        f"- Human PR: [#{task['ground_truth']['pr_number']}]({task['ground_truth']['pr_url']})",
+        f"- Evaluated agent: `{evaluated_agent}`",
+        (
+            f"- Judge agent: `{judge_agents[0]}`"
+            if len(judge_agents) == 1
+            else "- Judge agents: " + ", ".join(f"`{agent}`" for agent in judge_agents)
+        ),
+        f"- Eval ID: `{eval_id}`",
+        f"- Report path: `{report_rel}`",
+        "",
+        "## Blind Mapping",
+        mapping_rows,
+        "",
+        "## Judge Summary",
+        "\n".join(summary_rows),
+        "",
+        "## Published GitHub Links",
+        "\n".join(link_section),
+        "",
+    ]
+    for agent in judge_agents:
+        lines.extend(build_report_judge_section(judge_agent=agent, judgment=judgments[agent], blind_manifest=blind_manifest))
+    return "\n".join(lines)
 
 
 def build_matrix_entry(
@@ -2530,11 +2636,12 @@ def render_report_for_eval(
     *,
     task: dict[str, Any],
     evaluated_agent: str,
-    judge_agent: str,
     root: Path,
     eval_dir: Path,
 ) -> Path:
-    judgment = load_json(eval_dir / "judgment.json")
+    judgments = load_judgments(eval_dir)
+    if not judgments:
+        raise SystemExit(f"Evaluation {eval_dir.name} does not have any judgments yet")
     blind_manifest = load_json(eval_dir / "blind_manifest.json")
     publish_meta = None
     publish_path = eval_dir / "publish.json"
@@ -2544,9 +2651,8 @@ def render_report_for_eval(
     report = build_report_markdown(
         task=task,
         evaluated_agent=evaluated_agent,
-        judge_agent=judge_agent,
         eval_id=eval_dir.name,
-        judgment=judgment,
+        judgments=judgments,
         blind_manifest=blind_manifest,
         publish_meta=publish_meta,
         report_path=report_path,
@@ -2573,6 +2679,8 @@ def cmd_judge(
     eval_id_value = eval_id or new_eval_id()
     eval_path = evaluation_dir(root, task_id, evaluated_agent, eval_id_value)
     if eval_path.exists():
+        if judge_agent in load_judgments(eval_path):
+            raise SystemExit(f"Evaluation {eval_path.name} already has a {judge_agent} judgment")
         existing = ensure_existing_eval_can_be_judged(eval_path)
         blind_manifest = existing["blind_manifest"]
         write_blind_judge_artifacts(task=task, root=root, blind_manifest=blind_manifest, eval_dir=eval_path)
@@ -2594,11 +2702,10 @@ def cmd_judge(
     judgment["judge_agent"] = judge_agent
     if judge_model is not None:
         judgment["judge_model"] = judge_model
-    write_json(eval_path / "judgment.json", judgment)
+    write_judgment(eval_path, judgment)
     report_path = render_report_for_eval(
         task=task,
         evaluated_agent=evaluated_agent,
-        judge_agent=judge_agent,
         root=root,
         eval_dir=eval_path,
     )
@@ -2748,11 +2855,9 @@ def cmd_publish(
         "warning": "Public branch publishing can contaminate future benchmarks. These branches should only be created after evaluation is complete.",
     }
     write_json(eval_path / "publish.json", publish_meta)
-    judgment = load_json(eval_path / "judgment.json")
     report_path = render_report_for_eval(
         task=task,
         evaluated_agent=evaluated_agent,
-        judge_agent=judgment["judge_agent"],
         root=root,
         eval_dir=eval_path,
     )
@@ -2784,11 +2889,9 @@ def cmd_report(
 ) -> int:
     task = tasks[task_id]
     eval_path = resolve_eval_dir(root, task_id, evaluated_agent, eval_id)
-    judgment = load_json(eval_path / "judgment.json")
     report_path = render_report_for_eval(
         task=task,
         evaluated_agent=evaluated_agent,
-        judge_agent=judgment["judge_agent"],
         root=root,
         eval_dir=eval_path,
     )
@@ -2813,15 +2916,13 @@ def cmd_report_all(
         if eval_path is None:
             skipped.append(f"{task_id} ({evaluated_agent}): no runs found")
             continue
-        judgment_path = eval_path / "judgment.json"
-        if not judgment_path.exists():
+        judgments = load_judgments(eval_path)
+        if not judgments:
             skipped.append(f"{task_id} ({evaluated_agent} {eval_path.name}): not judged")
             continue
-        judgment = load_json(judgment_path)
         report_path = render_report_for_eval(
             task=task,
             evaluated_agent=evaluated_agent,
-            judge_agent=judgment["judge_agent"],
             root=root,
             eval_dir=eval_path,
         )
@@ -2832,22 +2933,23 @@ def cmd_report_all(
             maybe = normalize_publish_metadata(load_json(publish_path))
             if maybe and maybe.get("published"):
                 publish_meta = maybe
-        included.append(f"{task_id} ({evaluated_agent} {eval_path.name})")
-        entries.append(
-            build_matrix_entry(
-                task=task,
-                evaluated_agent=evaluated_agent,
-                judge_agent=judgment["judge_agent"],
-                eval_id=eval_path.name,
-                judgment=judgment,
-                blind_manifest=blind_manifest,
-                publish_meta=publish_meta,
-                report_path=report_path,
-                root=root,
+        for judge_agent, judgment in judgments.items():
+            included.append(f"{task_id} ({evaluated_agent} {eval_path.name}, judged by {judge_agent})")
+            entries.append(
+                build_matrix_entry(
+                    task=task,
+                    evaluated_agent=evaluated_agent,
+                    judge_agent=judge_agent,
+                    eval_id=eval_path.name,
+                    judgment=judgment,
+                    blind_manifest=blind_manifest,
+                    publish_meta=publish_meta,
+                    report_path=report_path,
+                    root=root,
+                )
             )
-        )
     if included:
-        print("included runs:")
+        print("included judgments:")
         for item in included:
             print(f"- {item}")
     if skipped:
@@ -2871,7 +2973,7 @@ def cmd_run_task(
     *,
     evaluated_agent: str,
     agent_model: str | None,
-    judge_agent: str,
+    judge_agents: list[str],
     judge_model: str | None,
     force: bool,
     extra_args: list[str],
@@ -2879,12 +2981,15 @@ def cmd_run_task(
     task = tasks[task_id]
     eval_id = new_eval_id()
     build_args = forwarded_build_args(extra_args, agent_model)
+    total_steps = 6 + len(judge_agents)
+    step = 1
 
-    print(f"[1/6] preparing {task_id}")
+    print(f"[{step}/{total_steps}] preparing {task_id}")
     prepare_task(root, task, force=force)
+    step += 1
 
-    for index, condition in enumerate(SUPPORTED_CONDITIONS, start=2):
-        print(f"[{index}/6] launching {evaluated_agent} {condition}")
+    for condition in SUPPORTED_CONDITIONS:
+        print(f"[{step}/{total_steps}] launching {evaluated_agent} {condition}")
         result = cmd_launch(
             tasks,
             task_id,
@@ -2898,23 +3003,26 @@ def cmd_run_task(
         if result != 0:
             print(f"stopping after {condition} launch failed with exit code {result}")
             return result
+        step += 1
 
-    print(f"[4/6] judging {task_id}")
-    result = cmd_judge(
-        tasks,
-        task_id,
-        root,
-        evaluated_agent=evaluated_agent,
-        judge_agent=judge_agent,
-        judge_model=judge_model,
-        eval_id=eval_id,
-        prepare=False,
-        force=False,
-    )
-    if result != 0:
-        return result
+    for judge_agent in judge_agents:
+        print(f"[{step}/{total_steps}] judging {task_id} with {judge_agent}")
+        result = cmd_judge(
+            tasks,
+            task_id,
+            root,
+            evaluated_agent=evaluated_agent,
+            judge_agent=judge_agent,
+            judge_model=judge_model,
+            eval_id=eval_id,
+            prepare=False,
+            force=False,
+        )
+        if result != 0:
+            return result
+        step += 1
 
-    print(f"[5/6] publishing {task_id}")
+    print(f"[{step}/{total_steps}] publishing {task_id}")
     result = cmd_publish(
         tasks,
         task_id,
@@ -2924,14 +3032,26 @@ def cmd_run_task(
     )
     if result != 0:
         return result
+    step += 1
 
-    print(f"[6/6] refreshing report {task_id}")
-    return cmd_report(
+    print(f"[{step}/{total_steps}] refreshing report {task_id}")
+    result = cmd_report(
         tasks,
         task_id,
         root,
         evaluated_agent=evaluated_agent,
         eval_id=eval_id,
+    )
+    if result != 0:
+        return result
+    step += 1
+
+    print(f"[{step}/{total_steps}] refreshing matrix for {evaluated_agent}")
+    return cmd_report_all(
+        tasks,
+        [],
+        root,
+        evaluated_agent=evaluated_agent,
     )
 
 
@@ -3044,8 +3164,17 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
     run_task_parser.add_argument("task_id", choices=task_ids)
     run_task_parser.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
     run_task_parser.add_argument("--agent-model")
-    run_task_parser.add_argument("--judge-agent", choices=SUPPORTED_AGENTS, default=None)
-    run_task_parser.add_argument("--judge-model")
+    run_task_parser.add_argument(
+        "--judge-agent",
+        action="append",
+        choices=SUPPORTED_AGENTS,
+        default=None,
+        help="Repeat to choose a subset. Defaults to running both claude and codex judges.",
+    )
+    run_task_parser.add_argument(
+        "--judge-model",
+        help="Judge model override. Only valid when run-task is using a single judge.",
+    )
     run_task_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     run_task_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
 
@@ -3159,7 +3288,7 @@ def main() -> int:
             args.root,
             evaluated_agent=args.agent,
             agent_model=args.agent_model,
-            judge_agent=args.judge_agent or default_judge_agent(),
+            judge_agents=default_run_task_judge_agents(args.judge_agent, args.judge_model),
             judge_model=args.judge_model,
             force=args.force,
             extra_args=extra_args,

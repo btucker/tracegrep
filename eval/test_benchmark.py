@@ -190,6 +190,21 @@ class BenchmarkHarnessTests(unittest.TestCase):
 
         self.assertIn("Do not run `git fetch`, `git pull`, `git checkout`", prompt)
 
+    def test_build_launcher_script_uses_headless_codex_exec(self) -> None:
+        script = benchmark.build_launcher_script(self.task, Path("/tmp/root"), "codex", "control")
+
+        self.assertIn('exec codex exec --full-auto --skip-git-repo-check "$@" - < "$PROMPT_FILE"', script)
+        self.assertNotIn('exec codex --full-auto "$@" "$(cat "$PROMPT_FILE")"', script)
+
+    def test_build_launcher_script_uses_headless_claude_print_mode(self) -> None:
+        script = benchmark.build_launcher_script(self.task, Path("/tmp/root"), "claude", "control")
+
+        self.assertIn(
+            'exec claude -p --permission-mode bypassPermissions --tools default "$@" "$(cat "$PROMPT_FILE")"',
+            script,
+        )
+        self.assertNotIn('exec claude "$@" "$(cat "$PROMPT_FILE")"', script)
+
     def test_build_discovery_shortlist_preserves_candidate_metadata(self) -> None:
         shortlist = benchmark.build_discovery_shortlist(
             self.example_discovery_selection(),
@@ -305,7 +320,8 @@ class BenchmarkHarnessTests(unittest.TestCase):
         )
         self.assertIn("Publishing has not been run yet", report)
         self.assertIn("\n## Task Metadata\n", report)
-        self.assertIn("\n## Blind Verdict Summary\n", report)
+        self.assertIn("\n## Judge Summary\n", report)
+        self.assertIn("\n## Judge Result: claude\n", report)
         self.assertIn("Better matches the accepted PR: `tg`", report)
         self.assertIn("Better overall (`control` vs `tg`): `tie`", report)
         self.assertIn("Best of all three: `accepted_pr`", report)
@@ -358,23 +374,28 @@ class BenchmarkHarnessTests(unittest.TestCase):
             root = Path(tmp) / "workspaces"
             eval_dir = benchmark.evaluation_dir(root, "demo-task", "codex", "20260310T000000Z")
             eval_dir.mkdir(parents=True, exist_ok=True)
-            benchmark.write_json(eval_dir / "judgment.json", self.example_judgment() | {"judge_agent": "claude"})
+            benchmark.write_judgment(eval_dir, self.example_judgment() | {"judge_agent": "claude"})
+            benchmark.write_judgment(eval_dir, self.example_judgment() | {"judge_agent": "codex"})
             benchmark.write_json(eval_dir / "blind_manifest.json", self.example_blind_manifest())
             benchmark.write_json(eval_dir / "publish.json", {"published": False})
             report_path = benchmark.render_report_for_eval(
                 task=self.task,
                 evaluated_agent="codex",
-                judge_agent="claude",
                 root=root,
                 eval_dir=eval_dir,
             )
             self.assertTrue(report_path.exists())
+            report = report_path.read_text()
+            self.assertIn("## Judge Summary", report)
+            self.assertIn("## Judge Result: claude", report)
+            self.assertIn("## Judge Result: codex", report)
             tasks = {"demo-task": self.task}
             exit_code = benchmark.cmd_report_all(tasks, ["demo-task"], root, evaluated_agent="codex")
             self.assertEqual(exit_code, 0)
             self.assertTrue((root.parent / "reports" / "matrix.md").exists())
             matrix = (root.parent / "reports" / "matrix.md").read_text()
             self.assertIn("| demo-task | codex | claude |", matrix)
+            self.assertIn("| demo-task | codex | codex |", matrix)
             self.assertIn("Best of all three", matrix)
             self.assertIn("How to read this table", matrix)
 
@@ -430,8 +451,8 @@ class BenchmarkHarnessTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             output = stdout.getvalue()
-            self.assertIn("included runs:", output)
-            self.assertIn("demo-task (codex 20260310T000000Z)", output)
+            self.assertIn("included judgments:", output)
+            self.assertIn("demo-task (codex 20260310T000000Z, judged by claude)", output)
             self.assertIn("skipped runs:", output)
             self.assertIn("other-task (codex 20260310T010000Z): not judged", output)
             self.assertIn("missing-task (codex): no runs found", output)
@@ -462,6 +483,13 @@ class BenchmarkHarnessTests(unittest.TestCase):
     def test_forwarded_build_args_rejects_conflicting_model_flags(self) -> None:
         with self.assertRaises(SystemExit):
             benchmark.forwarded_build_args(["--model", "gpt-5"], "sonnet")
+
+    def test_default_run_task_judge_agents_uses_both_judges(self) -> None:
+        self.assertEqual(benchmark.default_run_task_judge_agents(None, None), ["claude", "codex"])
+
+    def test_default_run_task_judge_agents_rejects_shared_model_for_multiple_judges(self) -> None:
+        with self.assertRaises(SystemExit):
+            benchmark.default_run_task_judge_agents(None, "sonnet")
 
     def test_describe_task_runs_handles_missing_prepared_and_evaluated_states(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -768,7 +796,7 @@ class BenchmarkHarnessTests(unittest.TestCase):
                     force=False,
                 )
 
-            judgment = benchmark.load_json(eval_dir / "judgment.json")
+            judgment = benchmark.load_judgment(eval_dir, "claude")
             refreshed_prompt = (eval_dir / "judge_prompt.md").read_text()
 
         self.assertEqual(exit_code, 0)
@@ -881,6 +909,53 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertEqual(run_mock.call_args.args[0][-3:], ["--model", "gpt-5", "-"])
         self.assertNotIn(prompt, run_mock.call_args.args[0])
         self.assertEqual(run_mock.call_args.kwargs["input_text"], prompt)
+
+    def test_cmd_run_task_refreshes_matrix_after_report(self) -> None:
+        tasks = {"demo-task": self.task}
+        with (
+            mock.patch.object(benchmark, "new_eval_id", return_value="20260310T150000Z"),
+            mock.patch.object(benchmark, "prepare_task") as prepare_mock,
+            mock.patch.object(benchmark, "cmd_launch", return_value=0) as launch_mock,
+            mock.patch.object(benchmark, "cmd_judge", return_value=0) as judge_mock,
+            mock.patch.object(benchmark, "cmd_publish", return_value=0) as publish_mock,
+            mock.patch.object(benchmark, "cmd_report", return_value=0) as report_mock,
+            mock.patch.object(benchmark, "cmd_report_all", return_value=0) as report_all_mock,
+        ):
+            result = benchmark.cmd_run_task(
+                tasks,
+                "demo-task",
+                Path("/tmp/root"),
+                evaluated_agent="codex",
+                agent_model="gpt-5",
+                judge_agents=["claude", "codex"],
+                judge_model=None,
+                force=False,
+                extra_args=["--effort", "high"],
+            )
+
+        self.assertEqual(result, 0)
+        prepare_mock.assert_called_once_with(Path("/tmp/root"), self.task, force=False)
+        self.assertEqual(launch_mock.call_count, 2)
+        self.assertEqual(launch_mock.call_args_list[0].kwargs["condition"], "control")
+        self.assertEqual(launch_mock.call_args_list[1].kwargs["condition"], "tg")
+        self.assertEqual(launch_mock.call_args_list[0].kwargs["extra_args"], ["--model", "gpt-5", "--effort", "high"])
+        self.assertEqual(judge_mock.call_count, 2)
+        self.assertEqual(judge_mock.call_args_list[0].kwargs["judge_agent"], "claude")
+        self.assertEqual(judge_mock.call_args_list[1].kwargs["judge_agent"], "codex")
+        publish_mock.assert_called_once()
+        report_mock.assert_called_once_with(
+            tasks,
+            "demo-task",
+            Path("/tmp/root"),
+            evaluated_agent="codex",
+            eval_id="20260310T150000Z",
+        )
+        report_all_mock.assert_called_once_with(
+            tasks,
+            [],
+            Path("/tmp/root"),
+            evaluated_agent="codex",
+        )
 
 
 class BenchmarkCliSmokeTests(unittest.TestCase):
