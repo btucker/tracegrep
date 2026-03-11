@@ -72,7 +72,14 @@ fn collect_functions(
                 inner_scopes.push(type_name);
                 for i in 0..node.child_count() {
                     if let Some(child) = node.child(u32::try_from(i).unwrap()) {
-                        collect_functions(child, src, ctx, in_test_context, &inner_scopes, functions);
+                        collect_functions(
+                            child,
+                            src,
+                            ctx,
+                            in_test_context,
+                            &inner_scopes,
+                            functions,
+                        );
                     }
                 }
                 return;

@@ -785,7 +785,9 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
         }
 
         // Check if this match belongs to the same function as the current block
-        let current_func_name = func_info.as_ref().map(|(node, _, _)| node.qualified_name.as_str());
+        let current_func_name = func_info
+            .as_ref()
+            .map(|(node, _, _)| node.qualified_name.as_str());
         let same_function = current_block.as_ref().is_some_and(|block| {
             block.file == file
                 && block.function_name.is_some()
