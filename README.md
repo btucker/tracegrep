@@ -1,16 +1,56 @@
 # tracegrep
 
-`tracegrep` layers call-graph context on top of `rg` results.
+`tracegrep` layers backtrace context on top of `rg` ([ripgrep](https://github.com/BurntSushi/ripgrep)) results.
+It exists to give coding agents instant context for how a line of code is used in the codebase. This allows the agent to gain a more complete understanding prior to making changes.
+Rust, Python, TypeScript, and JavaScript are currently supported via [treesitter](https://github.com/tree-sitter/tree-sitter).
 
-It exists to give coding agent instant context for how a line of code is used in the codebase. This allows the coding agent to gain a more complete understanding prior to making changes.
+This repo includes a `SKILL.md` plus plugin wrappers for Claude Code, Codex, and Cursor.
 
-This repo also includes a Claude Code skill for tracegrep-aware search flow.
+`tracegrep` maintains a mostly compatible CLI to `ripgrep`.
+
+`$ rg tool_block`
+```rust
+212:    let blocks = extract_tool_blocks(session_events);
+279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {
+```
+
+`$ tg tool_block`
+```rust
+src/daemon/stream.rs:append_tool_data_effects
+212:    let blocks = extract_tool_blocks(session_events);
+  Called by:
+    src/daemon/stream.rs:process_lead_output:110  (when events.get(main_lead_session_name) is Some(lead_events) && ...)
+
+src/daemon/stream.rs:extract_tool_blocks
+279:fn extract_tool_blocks(events: &[StreamEvent]) -> Vec<ToolBlock> {
+  Called by:
+    src/daemon/stream.rs:append_tool_data_effects:206
+    src/daemon/stream.rs:process_agent_output:552  (when events.get(name.as_str()) is Some(coworker_events))
+```
 
 ## Installation
 
 Note: installation differs by environment. The CLI installs with Cargo. Claude Code can also load the packaged skill via the repo's plugin metadata.
 
-### CLI
+### CLI (quick install)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | sh
+```
+
+This downloads the latest release binary for your platform and installs it to `~/.local/bin`. You can customize the install directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | INSTALL_DIR=/usr/local/bin sh
+```
+
+Or install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/btucker/tracegrep/main/install.sh | VERSION=v0.1.0 sh
+```
+
+### CLI (from source)
 
 Install `rg` first, then install `tracegrep` from this repo:
 
