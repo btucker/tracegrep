@@ -229,6 +229,7 @@ struct SnippetLine {
 
 struct RenderedBlock {
     file: String,
+    function_name: Option<String>,
     location: String,
     match_line_number: usize,
     code_lines: Vec<SnippetLine>,
@@ -782,121 +783,158 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
             flush_block(&mut current_block, &colors, &mut timings);
             pending_context_lines.clear();
         }
-        let mut leading_context = pending_context_lines
-            .iter()
-            .filter(|context_line| {
-                context_line.line_number < line_number
-                    && line_number - context_line.line_number <= context.before
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        flush_block(&mut current_block, &colors, &mut timings);
-        pending_context_lines.clear();
-        pending_context_file = Some(file.to_string());
-        if let Some((node, callers, references)) = &func_info {
-            let (primary_callers, hidden_callers) =
-                truncate_context(callers.primary.clone(), options.max_context);
-            let (test_callers, hidden_test_callers) =
-                truncate_context(callers.test.clone(), options.max_context);
-            let (primary_references, hidden_references) =
-                truncate_context(references.primary.clone(), options.max_context);
-            let (_, hidden_test_references) =
-                truncate_context(references.test.clone(), options.max_context);
-            let hidden_context = HiddenContextCounts {
-                callers: hidden_callers,
-                test_callers: hidden_test_callers,
-                references: hidden_references,
-                test_references: hidden_test_references,
-            };
-            let mut location = colors.format_location(file, &node.name);
-            if options.compact {
-                let compact_sections = render_compact_sections(
-                    &colors,
-                    &CallerSplit {
-                        primary: primary_callers.clone(),
-                        test: test_callers.clone(),
-                    },
-                    &ReferenceSplit {
-                        primary: primary_references.clone(),
-                        test: Vec::new(),
-                    },
-                    options.include_test_callers,
-                    &hidden_context,
-                );
-                if !compact_sections.is_empty() {
-                    location.push(' ');
-                    location.push_str(&compact_sections.join(" "));
+
+        // Check if this match belongs to the same function as the current block
+        let current_func_name = func_info
+            .as_ref()
+            .map(|(node, _, _)| node.qualified_name.as_str());
+        let same_function = current_block.as_ref().is_some_and(|block| {
+            block.file == file
+                && block.function_name.is_some()
+                && block.function_name.as_deref() == current_func_name
+        });
+
+        if same_function {
+            // Merge into existing block: add gap context lines and the match line
+            let block = current_block.as_mut().unwrap();
+            let max_existing = block.code_lines.last().map(|l| l.line_number).unwrap_or(0);
+            for ctx in &pending_context_lines {
+                if ctx.line_number > max_existing
+                    && ctx.line_number < line_number
+                    && line_number - ctx.line_number <= context.before
+                {
+                    block.code_lines.push(ctx.clone());
                 }
             }
-            leading_context.push(SnippetLine {
+            block.code_lines.push(SnippetLine {
                 line_number,
                 content: highlighted_content,
                 is_match: true,
             });
-            let mut detail_lines = Vec::new();
-            if !options.compact {
-                if !primary_callers.is_empty() {
-                    detail_lines.push(format!("  {}", colors.dim("Called by:")));
-                    for caller in &primary_callers {
-                        detail_lines.push(format!("    {}", colors.format_caller(caller)));
+            block.match_line_number = line_number;
+            pending_context_lines.clear();
+            pending_context_file = Some(file.to_string());
+        } else {
+            let mut leading_context = pending_context_lines
+                .iter()
+                .filter(|context_line| {
+                    context_line.line_number < line_number
+                        && line_number - context_line.line_number <= context.before
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            flush_block(&mut current_block, &colors, &mut timings);
+            pending_context_lines.clear();
+            pending_context_file = Some(file.to_string());
+            if let Some((node, callers, references)) = &func_info {
+                let (primary_callers, hidden_callers) =
+                    truncate_context(callers.primary.clone(), options.max_context);
+                let (test_callers, hidden_test_callers) =
+                    truncate_context(callers.test.clone(), options.max_context);
+                let (primary_references, hidden_references) =
+                    truncate_context(references.primary.clone(), options.max_context);
+                let (_, hidden_test_references) =
+                    truncate_context(references.test.clone(), options.max_context);
+                let hidden_context = HiddenContextCounts {
+                    callers: hidden_callers,
+                    test_callers: hidden_test_callers,
+                    references: hidden_references,
+                    test_references: hidden_test_references,
+                };
+                let mut location = colors.format_location(file, &node.name);
+                if options.compact {
+                    let compact_sections = render_compact_sections(
+                        &colors,
+                        &CallerSplit {
+                            primary: primary_callers.clone(),
+                            test: test_callers.clone(),
+                        },
+                        &ReferenceSplit {
+                            primary: primary_references.clone(),
+                            test: Vec::new(),
+                        },
+                        options.include_test_callers,
+                        &hidden_context,
+                    );
+                    if !compact_sections.is_empty() {
+                        location.push(' ');
+                        location.push_str(&compact_sections.join(" "));
                     }
                 }
-                if let Some(summary) = summarize_hidden_context("caller", hidden_callers) {
-                    detail_lines.push(format!("    {}", colors.dim(&summary)));
-                }
-                if options.include_test_callers && !test_callers.is_empty() {
-                    detail_lines.push(format!("  {}", colors.dim("Called by tests:")));
-                    for caller in &test_callers {
-                        detail_lines.push(format!("    {}", colors.format_caller(caller)));
+                leading_context.push(SnippetLine {
+                    line_number,
+                    content: highlighted_content,
+                    is_match: true,
+                });
+                let mut detail_lines = Vec::new();
+                if !options.compact {
+                    if !primary_callers.is_empty() {
+                        detail_lines.push(format!("  {}", colors.dim("Called by:")));
+                        for caller in &primary_callers {
+                            detail_lines.push(format!("    {}", colors.format_caller(caller)));
+                        }
                     }
-                    if let Some(summary) =
+                    if let Some(summary) = summarize_hidden_context("caller", hidden_callers) {
+                        detail_lines.push(format!("    {}", colors.dim(&summary)));
+                    }
+                    if options.include_test_callers && !test_callers.is_empty() {
+                        detail_lines.push(format!("  {}", colors.dim("Called by tests:")));
+                        for caller in &test_callers {
+                            detail_lines.push(format!("    {}", colors.format_caller(caller)));
+                        }
+                        if let Some(summary) =
+                            summarize_hidden_context("test caller", hidden_test_callers)
+                        {
+                            detail_lines.push(format!("    {}", colors.dim(&summary)));
+                        }
+                    } else if let Some(summary) =
                         summarize_hidden_context("test caller", hidden_test_callers)
+                            .or_else(|| summarize_hidden_test_callers(callers))
                     {
                         detail_lines.push(format!("    {}", colors.dim(&summary)));
                     }
-                } else if let Some(summary) =
-                    summarize_hidden_context("test caller", hidden_test_callers)
-                        .or_else(|| summarize_hidden_test_callers(callers))
-                {
-                    detail_lines.push(format!("    {}", colors.dim(&summary)));
-                }
-                if !primary_references.is_empty() {
-                    detail_lines.push(format!("  {}", colors.dim("Referenced by:")));
-                    for reference in &primary_references {
-                        detail_lines.push(format!("    {}", colors.format_reference(reference)));
+                    if !primary_references.is_empty() {
+                        detail_lines.push(format!("  {}", colors.dim("Referenced by:")));
+                        for reference in &primary_references {
+                            detail_lines
+                                .push(format!("    {}", colors.format_reference(reference)));
+                        }
+                    }
+                    if let Some(summary) = summarize_hidden_context("reference", hidden_references)
+                    {
+                        detail_lines.push(format!("    {}", colors.dim(&summary)));
+                    }
+                    if let Some(summary) =
+                        summarize_hidden_context("test reference", hidden_test_references)
+                            .or_else(|| summarize_hidden_test_references(references))
+                    {
+                        detail_lines.push(format!("    {}", colors.dim(&summary)));
                     }
                 }
-                if let Some(summary) = summarize_hidden_context("reference", hidden_references) {
-                    detail_lines.push(format!("    {}", colors.dim(&summary)));
-                }
-                if let Some(summary) =
-                    summarize_hidden_context("test reference", hidden_test_references)
-                        .or_else(|| summarize_hidden_test_references(references))
-                {
-                    detail_lines.push(format!("    {}", colors.dim(&summary)));
-                }
+                current_block = Some(RenderedBlock {
+                    file: file.to_string(),
+                    function_name: Some(node.qualified_name.clone()),
+                    location,
+                    match_line_number: line_number,
+                    code_lines: leading_context,
+                    detail_lines,
+                });
+            } else {
+                leading_context.push(SnippetLine {
+                    line_number,
+                    content: highlighted_content,
+                    is_match: true,
+                });
+                let location = colors.path(file);
+                current_block = Some(RenderedBlock {
+                    file: file.to_string(),
+                    function_name: None,
+                    location,
+                    match_line_number: line_number,
+                    code_lines: leading_context,
+                    detail_lines: Vec::new(),
+                });
             }
-            current_block = Some(RenderedBlock {
-                file: file.to_string(),
-                location,
-                match_line_number: line_number,
-                code_lines: leading_context,
-                detail_lines,
-            });
-        } else {
-            leading_context.push(SnippetLine {
-                line_number,
-                content: highlighted_content,
-                is_match: true,
-            });
-            let location = colors.path(file);
-            current_block = Some(RenderedBlock {
-                file: file.to_string(),
-                location,
-                match_line_number: line_number,
-                code_lines: leading_context,
-                detail_lines: Vec::new(),
-            });
         }
     }
 
