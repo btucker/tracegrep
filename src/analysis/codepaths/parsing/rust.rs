@@ -9,7 +9,7 @@ pub(super) fn extract(
     ctx: &ParseContext,
 ) -> Option<FileArtifact> {
     let mut functions = Vec::new();
-    collect_functions(root, src, ctx, false, &mut functions);
+    collect_functions(root, src, ctx, false, &[], &mut functions);
     Some(FileArtifact {
         source_hash: String::new(),
         functions,
@@ -21,6 +21,7 @@ fn collect_functions(
     src: &[u8],
     ctx: &ParseContext,
     in_test_context: bool,
+    scopes: &[String],
     functions: &mut Vec<FunctionArtifact>,
 ) {
     let is_cfg_test_module = node.kind() == "mod_item" && has_cfg_test_attr(node, src);
@@ -40,7 +41,7 @@ fn collect_functions(
             let name = text(name_node, src);
             let line = node.start_position().row + 1;
             let end_line = node.end_position().row + 1;
-            let qualified_name = ctx.qualified_name(&[], &name);
+            let qualified_name = ctx.qualified_name(scopes, &name);
 
             let mut call_sites = Vec::new();
             let mut reference_sites = Vec::new();
@@ -59,11 +60,29 @@ fn collect_functions(
                 reference_sites,
             });
         }
+        return;
+    }
+
+    // Track impl type as a scope so methods get qualified names like Foo::new
+    if node.kind() == "impl_item" {
+        if let Some(type_node) = node.child_by_field_name("type") {
+            let type_name = text(type_node, src);
+            if !type_name.is_empty() {
+                let mut inner_scopes = scopes.to_vec();
+                inner_scopes.push(type_name);
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(u32::try_from(i).unwrap()) {
+                        collect_functions(child, src, ctx, in_test_context, &inner_scopes, functions);
+                    }
+                }
+                return;
+            }
+        }
     }
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(u32::try_from(i).unwrap()) {
-            collect_functions(child, src, ctx, in_test_context, functions);
+            collect_functions(child, src, ctx, in_test_context, scopes, functions);
         }
     }
 }

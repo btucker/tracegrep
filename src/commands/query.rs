@@ -785,7 +785,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
         }
 
         // Check if this match belongs to the same function as the current block
-        let current_func_name = func_info.as_ref().map(|(node, _, _)| node.name.as_str());
+        let current_func_name = func_info.as_ref().map(|(node, _, _)| node.qualified_name.as_str());
         let same_function = current_block.as_ref().is_some_and(|block| {
             block.file == file
                 && block.function_name.is_some()
@@ -911,7 +911,7 @@ pub fn run(options: QueryOptions<'_>) -> anyhow::Result<()> {
                 }
                 current_block = Some(RenderedBlock {
                     file: file.to_string(),
-                    function_name: Some(node.name.clone()),
+                    function_name: Some(node.qualified_name.clone()),
                     location,
                     match_line_number: line_number,
                     code_lines: leading_context,

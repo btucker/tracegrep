@@ -489,6 +489,51 @@ fn target() {
 }
 
 #[test]
+fn test_query_does_not_merge_same_named_methods_in_different_impls() {
+    let dir = create_repo(&[(
+        "src/main.rs",
+        r#"struct Foo;
+struct Bar;
+
+fn call_foo() { Foo::new(); }
+fn call_bar() { Bar::new(); }
+
+impl Foo {
+    fn new() -> Self {
+        let needle = "foo";
+        Foo
+    }
+}
+
+impl Bar {
+    fn new() -> Self {
+        let needle = "bar";
+        Bar
+    }
+}
+"#,
+    )]);
+
+    let output = run_tracegrep(dir.path(), &["needle"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8(output.stderr).unwrap()
+    );
+    // Both Foo::new and Bar::new should produce separate blocks
+    // i.e., "Called by:" should appear twice (once per block)
+    assert_eq!(
+        stdout.matches("Called by:").count(),
+        2,
+        "each impl's method should get its own block, stdout:\n{stdout}"
+    );
+    // Both matches should be present
+    assert!(stdout.contains("\"foo\""), "stdout:\n{stdout}");
+    assert!(stdout.contains("\"bar\""), "stdout:\n{stdout}");
+}
+
+#[test]
 fn test_query_shows_before_context_for_subsequent_matches() {
     let dir = create_repo(&[(
         "src/main.rs",
