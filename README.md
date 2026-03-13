@@ -4,7 +4,7 @@
 It exists to give coding agents instant context for how a line of code is used in the codebase. This allows the agent to gain a more complete understanding prior to making changes.
 Rust, Python, TypeScript, and JavaScript are currently supported via [treesitter](https://github.com/tree-sitter/tree-sitter).
 
-This repo includes a `SKILL.md` plus plugin wrappers for Claude Code, Codex, and Cursor.
+This repo includes a Claude Code plugin with a search skill and hooks (PreToolUse search guidance, PostToolUse call-graph annotations, SessionStart context injection), plus a standalone `SKILL.md` for Codex and Cursor.
 
 `tracegrep` maintains a mostly compatible CLI to `ripgrep`.
 
@@ -32,7 +32,7 @@ src/daemon/stream.rs:extract_tool_blocks
 
 ## Installation
 
-Note: installation differs by environment. The CLI installs with Cargo. Claude Code can also load the packaged skill via the repo's plugin metadata.
+Note: installation differs by environment. The CLI installs with Cargo. Claude Code can also load the plugin (skill + hooks) via the repo's plugin metadata.
 
 ### CLI (quick install)
 

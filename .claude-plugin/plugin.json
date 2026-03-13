@@ -1,6 +1,6 @@
 {
   "name": "tracegrep",
-  "description": "Claude Code skill for tracegrep-aware search across .rs, .py, .js, .jsx, .svelte, .ts, and .tsx files",
+  "description": "Claude Code plugin for tracegrep-aware search with call-graph context. Includes a skill for tg-based search, plus hooks for search guidance (PreToolUse), call-graph annotations (PostToolUse), and session context injection (SessionStart).",
   "version": "0.1.0",
   "author": {
     "name": "Ben Tucker",
@@ -9,5 +9,5 @@
   "homepage": "https://github.com/btucker/tracegrep",
   "repository": "https://github.com/btucker/tracegrep",
   "license": "MIT",
-  "keywords": ["skills", "search", "tracegrep", "rust", "python", "javascript", "typescript", "svelte", "code-search"]
+  "keywords": ["skills", "hooks", "search", "tracegrep", "call-graph", "rust", "python", "javascript", "typescript", "svelte", "code-search"]
 }

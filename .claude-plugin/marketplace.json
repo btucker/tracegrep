@@ -1,6 +1,6 @@
 {
   "name": "tracegrep-dev",
-  "description": "Development marketplace for the tracegrep Claude Code skill",
+  "description": "Development marketplace for the tracegrep Claude Code plugin",
   "owner": {
     "name": "Ben Tucker",
     "email": "ben@btucker.net"
@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "tracegrep",
-      "description": "Claude Code skill for tracegrep-aware search across .rs, .py, .js, .jsx, .svelte, .ts, and .tsx files",
+      "description": "Claude Code plugin for tracegrep-aware search with call-graph context. Includes a skill for tg-based search, plus hooks for search guidance (PreToolUse), call-graph annotations (PostToolUse), and session context injection (SessionStart).",
       "version": "0.1.0",
       "source": "./",
       "author": {
