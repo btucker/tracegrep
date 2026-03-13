@@ -95,9 +95,10 @@ If you want to benchmark one task end to end, use `run-task`:
 ```bash
 uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent codex
 uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent claude --agent-model sonnet --judge-agent codex --judge-model gpt-5
+uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent codex --review-pass --review-model sonnet
 ```
 
-`run-task` is the default high-level workflow. It prepares both worktrees, runs both conditions, captures each agent's structured JSONL event stream, judges the result with both Claude and Codex by default, optionally publishes branches, writes the markdown report, and refreshes the aggregate `eval/reports/matrix.md` for that agent.
+`run-task` is the default high-level workflow. It prepares both worktrees, runs both conditions, captures each agent's structured JSONL event stream, judges the result with both Claude and Codex by default, can optionally run a Claude review plus an address-the-review second iteration for each variant, optionally publishes branches, writes the markdown report, and refreshes the aggregate `eval/reports/matrix.md` for that agent.
 The generated build launches are headless and exit on completion; they do not open an interactive Codex or Claude session window.
 
 ### Inspect current state
@@ -192,6 +193,8 @@ Model selection notes:
 - `run-task` uses both Claude and Codex judges by default. Pass one `--judge-agent` to restrict it to a single judge, or repeat `--judge-agent` to choose a subset.
 - `--judge-model` applies only when a single judge is selected for `run-task`, or when using the lower-level `judge` / `judge-all` commands.
 - If `--judge-model` is omitted, the judge CLI uses its default model.
+- `--review-pass` adds a Claude review step after each initial `control` / `tg` build, then reruns the evaluated agent against that feedback to produce additional blinded `control_review` / `tg_review` variants.
+- `--review-model` applies only to that optional Claude review step.
 - `run-task` rejects using both `--agent-model` and a forwarded `--model`/`-m` after `--` at the same time.
 
 ## Output layout
@@ -220,9 +223,15 @@ Judging a task creates:
 
 - `eval/workspaces/runs/<task>/session_logs/<agent>/<eval-id>/control.jsonl`
 - `eval/workspaces/runs/<task>/session_logs/<agent>/<eval-id>/tg.jsonl`
+- `eval/workspaces/runs/<task>/session_logs/<agent>/<eval-id>/control_review.jsonl` when `--review-pass` is enabled
+- `eval/workspaces/runs/<task>/session_logs/<agent>/<eval-id>/tg_review.jsonl` when `--review-pass` is enabled
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/control.diff`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/tg.diff`
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/control_review.diff` when `--review-pass` is enabled
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/tg_review.diff` when `--review-pass` is enabled
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/ground_truth.diff`
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/reviews/control.json` when `--review-pass` is enabled
+- `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/reviews/tg.json` when `--review-pass` is enabled
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/blind_manifest.json`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_input.json`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/judge_workspace/A.diff`
@@ -246,6 +255,8 @@ Rendering reports writes repo-tracked markdown artifacts:
 - `eval/reports/<task>/<agent>/<eval-id>.md`
 - `eval/reports/<task>/<agent>/<eval-id>.control.agent.jsonl`
 - `eval/reports/<task>/<agent>/<eval-id>.tg.agent.jsonl`
+- `eval/reports/<task>/<agent>/<eval-id>.control_review.agent.jsonl` when `--review-pass` is enabled
+- `eval/reports/<task>/<agent>/<eval-id>.tg_review.agent.jsonl` when `--review-pass` is enabled
 
 Aggregate reporting writes:
 
@@ -268,3 +279,4 @@ For the `tg` worktree only, `prepare` also creates:
 - Public publishing can leak benchmark solutions into future search. Treat published branches as post-hoc artifacts, not inputs to new runs.
 - The markdown reports and promoted session-log companions are meant to be committed back into this repo; the disposable run artifacts stay under `eval/workspaces/`.
 - Agent log format is agent-native JSONL: Codex launchers use `codex exec --json`, while Claude launchers use `claude -p --output-format stream-json`.
+- The optional review step currently uses Claude's `pr-review-toolkit:code-reviewer` agent before the second-pass `*_review` variants are built and judged blindly alongside the first-pass variants.

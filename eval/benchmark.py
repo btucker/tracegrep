@@ -41,6 +41,8 @@ DEFAULT_FORK_OWNER = "btucker"
 DEFAULT_JUDGE_AGENT = "claude"
 SUPPORTED_AGENTS = ("codex", "claude")
 SUPPORTED_CONDITIONS = ("control", "tg")
+CLAUDE_REVIEW_AGENT = "pr-review-toolkit:code-reviewer"
+VARIANT_REVIEW_SUFFIX = "_review"
 DISCOVERY_LANGUAGES = ("JavaScript", "Python", "Rust", "TypeScript")
 DISCOVERY_KIND_VALUES = ("bug", "feature")
 DEFAULT_DISCOVERY_MIN_STARS = 2000
@@ -56,106 +58,46 @@ BENCHMARK_EXPORT_EMAIL = "tracegrep-eval@example.com"
 WORKTREE_SNAPSHOT_EXCLUDES = (".codex", ".claude", ".eval-bin", ".tracegrep-cache")
 CODEX_HOME_BASELINE_FILES = ("auth.json", "config.toml")
 
-JUDGE_SCHEMA: dict[str, Any] = {
+SCORE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "better_matches_pr",
-        "better_overall",
-        "overall_ranking",
-        "confidence",
-        "scores",
-        "A_vs_pr_differences",
-        "B_vs_pr_differences",
-        "A_vs_B_differences",
-        "notable_strengths",
-        "notable_risks",
-        "summary",
+        "pr_alignment",
+        "reuse_alignment",
+        "duplication_risk",
+        "test_alignment",
     ],
     "properties": {
-        "better_matches_pr": {"type": "string", "enum": ["A", "B", "tie"]},
-        "better_overall": {"type": "string", "enum": ["A", "B", "tie"]},
-        "overall_ranking": {
-            "type": "array",
-            "items": {"type": "string", "enum": ["A", "B", "accepted_pr"]},
-            "minItems": 3,
-            "maxItems": 3,
-            "uniqueItems": True,
-        },
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-        "scores": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["A", "B"],
-            "properties": {
-                "A": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": [
-                        "pr_alignment",
-                        "reuse_alignment",
-                        "duplication_risk",
-                        "test_alignment",
-                    ],
-                    "properties": {
-                        "pr_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
-                        "reuse_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
-                        "duplication_risk": {"type": "integer", "minimum": 1, "maximum": 5},
-                        "test_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
-                    },
-                },
-                "B": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": [
-                        "pr_alignment",
-                        "reuse_alignment",
-                        "duplication_risk",
-                        "test_alignment",
-                    ],
-                    "properties": {
-                        "pr_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
-                        "reuse_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
-                        "duplication_risk": {"type": "integer", "minimum": 1, "maximum": 5},
-                        "test_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
-                    },
-                },
-            },
-        },
-        "A_vs_pr_differences": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 10,
-        },
-        "B_vs_pr_differences": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 10,
-        },
-        "A_vs_B_differences": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 10,
-        },
-        "notable_strengths": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["A", "B"],
-            "properties": {
-                "A": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
-                "B": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
-            },
-        },
-        "notable_risks": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["A", "B"],
-            "properties": {
-                "A": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
-                "B": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
-            },
-        },
+        "pr_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
+        "reuse_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
+        "duplication_risk": {"type": "integer", "minimum": 1, "maximum": 5},
+        "test_alignment": {"type": "integer", "minimum": 1, "maximum": 5},
+    },
+}
+
+REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "findings"],
+    "properties": {
         "summary": {"type": "string"},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["title", "details", "severity", "suggested_fix"],
+                "properties": {
+                    "title": {"type": "string"},
+                    "details": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["critical", "important", "minor"]},
+                    "suggested_fix": {"type": "string"},
+                    "file": {"type": "string"},
+                    "line": {"type": "integer", "minimum": 1},
+                },
+            },
+            "maxItems": 12,
+        },
     },
 }
 
@@ -253,6 +195,106 @@ query($searchQuery: String!, $limit: Int!) {
 """.strip()
 
 
+def blind_labels(count: int) -> list[str]:
+    labels = [chr(ord("A") + index) for index in range(count)]
+    if len(labels) != count or count > 26:
+        raise ValueError("blind_labels supports at most 26 variants")
+    return labels
+
+
+def reviewed_variant_name(condition: str) -> str:
+    return f"{condition}{VARIANT_REVIEW_SUFFIX}"
+
+
+def variant_names(review_enabled: bool = False) -> list[str]:
+    variants = list(SUPPORTED_CONDITIONS)
+    if review_enabled:
+        variants.extend(reviewed_variant_name(condition) for condition in SUPPORTED_CONDITIONS)
+    return variants
+
+
+def is_classic_variant_pair(variants: list[str]) -> bool:
+    return len(variants) == 2 and set(variants) == set(SUPPORTED_CONDITIONS)
+
+
+def build_judge_schema(labels: list[str]) -> dict[str, Any]:
+    if not labels:
+        raise ValueError("build_judge_schema requires at least one implementation label")
+    label_enum = [*labels, "tie"]
+    ranking_enum = [*labels, "accepted_pr"]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "best_matches_pr",
+            "best_overall",
+            "overall_ranking",
+            "confidence",
+            "scores",
+            "differences_vs_pr",
+            "implementation_differences",
+            "notable_strengths",
+            "notable_risks",
+            "summary",
+        ],
+        "properties": {
+            "best_matches_pr": {"type": "string", "enum": label_enum},
+            "best_overall": {"type": "string", "enum": label_enum},
+            "overall_ranking": {
+                "type": "array",
+                "items": {"type": "string", "enum": ranking_enum},
+                "minItems": len(ranking_enum),
+                "maxItems": len(ranking_enum),
+                "uniqueItems": True,
+            },
+            "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+            "scores": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": labels,
+                "properties": {label: SCORE_SCHEMA for label in labels},
+            },
+            "differences_vs_pr": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": labels,
+                "properties": {
+                    label: {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 10,
+                    }
+                    for label in labels
+                },
+            },
+            "implementation_differences": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 16,
+            },
+            "notable_strengths": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": labels,
+                "properties": {
+                    label: {"type": "array", "items": {"type": "string"}, "maxItems": 8}
+                    for label in labels
+                },
+            },
+            "notable_risks": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": labels,
+                "properties": {
+                    label: {"type": "array", "items": {"type": "string"}, "maxItems": 8}
+                    for label in labels
+                },
+            },
+            "summary": {"type": "string"},
+        },
+    }
+
+
 def load_task_list() -> list[dict[str, Any]]:
     return json.loads(TASKS_PATH.read_text())
 
@@ -285,6 +327,10 @@ def prompt_path(root: Path, task_id: str, condition: str) -> Path:
     return run_dir(root, task_id) / "prompts" / f"{condition}.md"
 
 
+def review_prompt_path(root: Path, task_id: str, condition: str) -> Path:
+    return run_dir(root, task_id) / "prompts" / f"{reviewed_variant_name(condition)}.md"
+
+
 def worktree_dir(root: Path, task_id: str, condition: str) -> Path:
     return run_dir(root, task_id) / "worktrees" / condition
 
@@ -309,12 +355,16 @@ def evaluation_report_path(root: Path, task_id: str, agent: str, eval_id: str) -
     return reports_dir(root) / task_id / agent / f"{eval_id}.md"
 
 
-def session_log_path(root: Path, task_id: str, agent: str, eval_id: str, condition: str) -> Path:
-    return run_dir(root, task_id) / "session_logs" / agent / eval_id / f"{condition}.jsonl"
+def session_log_path(root: Path, task_id: str, agent: str, eval_id: str, variant: str) -> Path:
+    return run_dir(root, task_id) / "session_logs" / agent / eval_id / f"{variant}.jsonl"
 
 
-def report_session_log_path(root: Path, task_id: str, agent: str, eval_id: str, condition: str) -> Path:
-    return reports_dir(root) / task_id / agent / f"{eval_id}.{condition}.agent.jsonl"
+def review_feedback_path(eval_dir: Path, condition: str) -> Path:
+    return eval_dir / "reviews" / f"{condition}.json"
+
+
+def report_session_log_path(root: Path, task_id: str, agent: str, eval_id: str, variant: str) -> Path:
+    return reports_dir(root) / task_id / agent / f"{eval_id}.{variant}.agent.jsonl"
 
 
 def discovery_dir(root: Path, agent: str, run_id: str) -> Path:
@@ -617,6 +667,71 @@ def build_prompt(task: dict[str, Any], condition: str) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+def build_review_prompt(task: dict[str, Any], condition: str, *, base_commit: str) -> str:
+    return textwrap.dedent(
+        f"""\
+        Review the current uncommitted changes in this repository for the benchmark task below.
+
+        Task: {task['prompt']['title']}
+        Condition: {condition}
+        Base commit: {base_commit}
+
+        Benchmark prompt:
+        {task['prompt']['body'].strip()}
+
+        Review instructions:
+        - Use the current working tree diff against the base commit as the review target.
+        - Focus on correctness, architectural fit, duplication risk, and test alignment.
+        - Ignore nits and speculative style comments.
+        - Return only JSON matching the provided schema.
+        """
+    ).strip() + "\n"
+
+
+def build_review_address_prompt(
+    task: dict[str, Any],
+    condition: str,
+    review_feedback: dict[str, Any],
+) -> str:
+    findings = review_feedback.get("findings", [])
+    finding_lines = ["- No actionable findings were reported. Re-check the work, rerun relevant validation, and only change code if needed."]
+    if findings:
+        finding_lines = []
+        for finding in findings:
+            location = ""
+            if finding.get("file"):
+                location = f" ({finding['file']}"
+                if finding.get("line"):
+                    location += f":{finding['line']}"
+                location += ")"
+            finding_lines.append(
+                f"- [{finding['severity']}] {finding['title']}{location}: {finding['details']} Fix: {finding['suggested_fix']}"
+            )
+    parts = [
+        "# Benchmark Task",
+        f"Task: {task['prompt']['title']}",
+        task["prompt"]["body"].strip(),
+        textwrap.dedent(
+            """\
+            Follow-up:
+            - A Claude review was run against your first-pass implementation.
+            - Address the actionable review findings below.
+            - Keep the change consistent with the surrounding code and tests.
+            - Run relevant tests or checks again before finishing, and mention what you ran.
+            """
+        ).strip(),
+        f"Condition: {condition}",
+        "Review summary:",
+        review_feedback.get("summary", "No summary provided."),
+        "",
+        "Review findings:",
+        "\n".join(finding_lines),
+        "",
+        condition_search_guidance(condition),
+    ]
+    return "\n\n".join(parts) + "\n"
+
+
 def build_run_readme(task: dict[str, Any], root: Path) -> str:
     base = run_dir(root, task["id"])
     lines = [
@@ -732,7 +847,8 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
         "",
         'BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
         f'WORKTREE="{worktree}"',
-        f'PROMPT_FILE="{prompt_file}"',
+        f'DEFAULT_PROMPT_FILE="{prompt_file}"',
+        'PROMPT_FILE="${TRACEGREP_EVAL_PROMPT_FILE:-$DEFAULT_PROMPT_FILE}"',
         "",
         'cd "$WORKTREE"',
     ]
@@ -1013,13 +1129,22 @@ def initialize_eval_run(
     evaluated_agent: str,
     eval_dir: Path,
     eval_id: str,
+    snapshot_commits: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    snapshot_commits, _ = write_diff_artifacts(
-        task=task,
-        root=root,
-        evaluated_agent=evaluated_agent,
-        eval_dir=eval_dir,
-    )
+    if snapshot_commits is None:
+        snapshot_commits, _ = write_diff_artifacts(
+            task=task,
+            root=root,
+            evaluated_agent=evaluated_agent,
+            eval_dir=eval_dir,
+        )
+    else:
+        write_diff_artifacts_from_snapshot_commits(
+            task=task,
+            root=root,
+            eval_dir=eval_dir,
+            snapshot_commits=snapshot_commits,
+        )
     blind_manifest = build_blind_manifest(
         task_id=task["id"],
         evaluated_agent=evaluated_agent,
@@ -1212,6 +1337,7 @@ def cmd_launch(
     force: bool,
     extra_args: list[str],
     session_log_file: Path | None = None,
+    prompt_override: Path | None = None,
 ) -> int:
     task = tasks[task_id]
     if prepare:
@@ -1223,8 +1349,11 @@ def cmd_launch(
         )
     command = [str(script), *extra_args]
     print("launching:", " ".join(shlex.quote(part) for part in command))
+    env = os.environ.copy()
+    if prompt_override is not None:
+        env["TRACEGREP_EVAL_PROMPT_FILE"] = str(prompt_override)
     if session_log_file is None:
-        completed = subprocess.run(command)
+        completed = subprocess.run(command, env=env)
         return completed.returncode
 
     session_log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1234,6 +1363,7 @@ def cmd_launch(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=env,
         )
         assert process.stdout is not None
         try:
@@ -1919,6 +2049,34 @@ def run_discovery_agent(agent: str, prompt: str, *, cwd: Path, model: str | None
     raise SystemExit(f"Unsupported discovery agent: {agent}")
 
 
+def run_review_claude(prompt: str, *, cwd: Path, review_model: str | None) -> dict[str, Any]:
+    require_command("claude")
+    command = [
+        "claude",
+        "-p",
+        "--agent",
+        CLAUDE_REVIEW_AGENT,
+        "--output-format",
+        "json",
+        "--json-schema",
+        json.dumps(REVIEW_SCHEMA),
+        "--permission-mode",
+        "bypassPermissions",
+        "--tools",
+        "default",
+    ]
+    if review_model:
+        command.extend(["--model", review_model])
+    completed = run(command, cwd=cwd, capture_output=True, input_text=prompt)
+    payload = parse_judge_output(completed.stdout)
+    if not isinstance(payload, dict):
+        raise ValueError("Review output was not a JSON object.")
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        raise ValueError("Review output missing findings array.")
+    return payload
+
+
 def latest_eval_dir_if_any(root: Path, task_id: str, agent: str) -> Path | None:
     base = evaluations_root(root, task_id, agent)
     if not base.exists():
@@ -1952,6 +2110,19 @@ def stable_token(*parts: str, length: int = 12) -> str:
     return digest[:length]
 
 
+def variant_order_for_manifest(
+    *,
+    task_id: str,
+    evaluated_agent: str,
+    eval_id: str,
+    variants: list[str],
+) -> list[str]:
+    return sorted(
+        variants,
+        key=lambda variant: stable_token(task_id, evaluated_agent, eval_id, variant, length=32),
+    )
+
+
 def build_blind_manifest(
     *,
     task_id: str,
@@ -1959,27 +2130,62 @@ def build_blind_manifest(
     eval_id: str,
     snapshot_commits: dict[str, str],
 ) -> dict[str, Any]:
-    flip = int(stable_token(task_id, evaluated_agent, eval_id, length=2), 16) % 2 == 1
-    label_to_condition = {"A": "control", "B": "tg"}
-    if flip:
-        label_to_condition = {"A": "tg", "B": "control"}
-    condition_to_label = {condition: label for label, condition in label_to_condition.items()}
+    variants = list(snapshot_commits)
+    labels = blind_labels(len(variants))
+    ordered_variants = variant_order_for_manifest(
+        task_id=task_id,
+        evaluated_agent=evaluated_agent,
+        eval_id=eval_id,
+        variants=variants,
+    )
+    label_to_variant = {label: variant for label, variant in zip(labels, ordered_variants, strict=True)}
+    variant_to_label = {variant: label for label, variant in label_to_variant.items()}
     return {
         "task_id": task_id,
         "evaluated_agent": evaluated_agent,
         "eval_id": eval_id,
-        "label_to_condition": label_to_condition,
-        "condition_to_label": condition_to_label,
+        "variants": variants,
+        "label_to_variant": label_to_variant,
+        "variant_to_label": variant_to_label,
+        "label_to_condition": label_to_variant,
+        "condition_to_label": variant_to_label,
         "snapshot_commits": snapshot_commits,
     }
 
 
-def branch_names(task_id: str, evaluated_agent: str, eval_id: str) -> dict[str, str]:
+def manifest_variants(blind_manifest: dict[str, Any]) -> list[str]:
+    if isinstance(blind_manifest.get("variants"), list):
+        return list(blind_manifest["variants"])
+    if isinstance(blind_manifest.get("label_to_variant"), dict):
+        return list(blind_manifest["label_to_variant"].values())
+    if isinstance(blind_manifest.get("label_to_condition"), dict):
+        return list(blind_manifest["label_to_condition"].values())
+    snapshot_commits = blind_manifest.get("snapshot_commits")
+    if isinstance(snapshot_commits, dict):
+        return list(snapshot_commits)
+    raise ValueError("Blind manifest does not define any variants.")
+
+
+def manifest_label_to_variant(blind_manifest: dict[str, Any]) -> dict[str, str]:
+    if isinstance(blind_manifest.get("label_to_variant"), dict):
+        return dict(blind_manifest["label_to_variant"])
+    if isinstance(blind_manifest.get("label_to_condition"), dict):
+        return dict(blind_manifest["label_to_condition"])
+    raise ValueError("Blind manifest does not define label mappings.")
+
+
+def manifest_variant_to_label(blind_manifest: dict[str, Any]) -> dict[str, str]:
+    if isinstance(blind_manifest.get("variant_to_label"), dict):
+        return dict(blind_manifest["variant_to_label"])
+    if isinstance(blind_manifest.get("condition_to_label"), dict):
+        return dict(blind_manifest["condition_to_label"])
+    return {variant: label for label, variant in manifest_label_to_variant(blind_manifest).items()}
+
+
+def branch_names(task_id: str, evaluated_agent: str, eval_id: str, variants: list[str] | None = None) -> dict[str, str]:
     opaque_id = stable_token(task_id, evaluated_agent, eval_id, length=16)
-    return {
-        "control": f"benchmark/{opaque_id}/control",
-        "tg": f"benchmark/{opaque_id}/tg",
-    }
+    selected = variants or list(SUPPORTED_CONDITIONS)
+    return {variant: f"benchmark/{opaque_id}/{variant}" for variant in selected}
 
 
 def benchmark_git_env(index_path: str) -> dict[str, str]:
@@ -2073,6 +2279,33 @@ def diff_file_summary(repo_dir: Path, base_rev: str, target_rev: str) -> dict[st
     }
 
 
+def write_diff_artifacts_from_snapshot_commits(
+    *,
+    task: dict[str, Any],
+    root: Path,
+    eval_dir: Path,
+    snapshot_commits: dict[str, str],
+) -> dict[str, Any]:
+    pre_fix = task["ground_truth"]["pre_fix_commit"]
+    cache_dir = ensure_repo_cache(root, task)
+    summaries: dict[str, Any] = {}
+
+    for variant, snapshot in snapshot_commits.items():
+        diff = git_diff(cache_dir, pre_fix, snapshot)
+        summary = diff_file_summary(cache_dir, pre_fix, snapshot)
+        write_text(eval_dir / f"{variant}.diff", diff)
+        write_json(eval_dir / f"{variant}_files.json", summary)
+        summaries[variant] = summary
+
+    ground_truth_commit = task["ground_truth"]["merge_commit"]
+    ground_truth_diff = git_diff(cache_dir, pre_fix, ground_truth_commit)
+    ground_truth_summary = diff_file_summary(cache_dir, pre_fix, ground_truth_commit)
+    write_text(eval_dir / "ground_truth.diff", ground_truth_diff)
+    write_json(eval_dir / "ground_truth_files.json", ground_truth_summary)
+    summaries["ground_truth"] = ground_truth_summary
+    return summaries
+
+
 def write_diff_artifacts(
     *,
     task: dict[str, Any],
@@ -2081,9 +2314,7 @@ def write_diff_artifacts(
     eval_dir: Path,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     pre_fix = task["ground_truth"]["pre_fix_commit"]
-    cache_dir = ensure_repo_cache(root, task)
     snapshot_commits: dict[str, str] = {}
-    summaries: dict[str, Any] = {}
 
     for condition in SUPPORTED_CONDITIONS:
         worktree = worktree_dir(root, task["id"], condition)
@@ -2097,18 +2328,12 @@ def write_diff_artifacts(
             f"Benchmark snapshot for {task['id']} {evaluated_agent} {condition} {eval_dir.name}",
         )
         snapshot_commits[condition] = snapshot
-        diff = git_diff(worktree, pre_fix, snapshot)
-        summary = diff_file_summary(worktree, pre_fix, snapshot)
-        write_text(eval_dir / f"{condition}.diff", diff)
-        write_json(eval_dir / f"{condition}_files.json", summary)
-        summaries[condition] = summary
-
-    ground_truth_commit = task["ground_truth"]["merge_commit"]
-    ground_truth_diff = git_diff(cache_dir, pre_fix, ground_truth_commit)
-    ground_truth_summary = diff_file_summary(cache_dir, pre_fix, ground_truth_commit)
-    write_text(eval_dir / "ground_truth.diff", ground_truth_diff)
-    write_json(eval_dir / "ground_truth_files.json", ground_truth_summary)
-    summaries["ground_truth"] = ground_truth_summary
+    summaries = write_diff_artifacts_from_snapshot_commits(
+        task=task,
+        root=root,
+        eval_dir=eval_dir,
+        snapshot_commits=snapshot_commits,
+    )
     return snapshot_commits, summaries
 
 
@@ -2126,11 +2351,10 @@ def write_blind_judge_artifacts(
     if not cache_dir.exists():
         cache_dir = ensure_repo_cache(root, task)
 
-    for label in ("A", "B"):
-        condition = blind_manifest["label_to_condition"][label]
-        write_text(workspace / f"{label}.diff", (eval_dir / f"{condition}.diff").read_text())
-        write_json(workspace / f"{label}_files.json", load_json(eval_dir / f"{condition}_files.json"))
-        export_commit_tree(cache_dir, blind_manifest["snapshot_commits"][condition], workspace / f"{label}_repo")
+    for label, variant in manifest_label_to_variant(blind_manifest).items():
+        write_text(workspace / f"{label}.diff", (eval_dir / f"{variant}.diff").read_text())
+        write_json(workspace / f"{label}_files.json", load_json(eval_dir / f"{variant}_files.json"))
+        export_commit_tree(cache_dir, blind_manifest["snapshot_commits"][variant], workspace / f"{label}_repo")
 
     write_text(workspace / "accepted_pr.diff", (eval_dir / "ground_truth.diff").read_text())
     write_json(workspace / "accepted_pr_files.json", load_json(eval_dir / "ground_truth_files.json"))
@@ -2144,7 +2368,7 @@ def build_judge_input(
 ) -> dict[str, Any]:
     workspace = judge_workspace_dir(eval_dir)
     implementations = {}
-    for label in ("A", "B"):
+    for label in blind_labels(len(manifest_variants(blind_manifest))):
         implementations[label] = {
             "diff_path": str((workspace / f"{label}.diff").relative_to(eval_dir)),
             "repo_path": str((workspace / f"{label}_repo").relative_to(eval_dir)),
@@ -2171,20 +2395,39 @@ def build_judge_input(
 
 
 def build_judge_prompt(judge_input: dict[str, Any]) -> str:
+    labels = [label for label in judge_input["implementations"]]
+    implementation_refs = []
+    for label in labels:
+        implementation_refs.extend(
+            [
+                f"- `{judge_input['implementations'][label]['diff_path']}` is the parent -> Implementation {label} diff.",
+                f"- `{judge_input['implementations'][label]['repo_path']}` is a sanitized export of Implementation {label}'s resulting repo tree.",
+            ]
+        )
+    summary_blocks = []
+    for label in labels:
+        summary_blocks.extend(
+            [
+                f"Changed-file summary for Implementation {label}:",
+                json.dumps(judge_input["implementations"][label]["files"], indent=2),
+                "",
+            ]
+        )
     return textwrap.dedent(
         f"""\
-        You are evaluating a three-way comparison for a historical benchmark task.
+        You are evaluating a blind multi-way comparison for a historical benchmark task.
+        When there are two benchmark variants, this reduces to the original three-way comparison against the accepted PR.
 
-        The judge must stay blind to which implementation came from the control condition and which came from the tracegrep condition.
+        The judge must stay blind to which implementation label maps to which benchmark variant.
 
         Your job:
-        - Compare Implementation A, Implementation B, and the accepted human PR as three candidate solutions to the same task.
-        - Use the three parent-to-solution diffs as the primary evidence and identify nuanced differences on your own.
-        - Decide which implementation better matches the accepted PR.
-        - Decide which implementation appears better on its own merits.
-        - Rank `A`, `B`, and `accepted_pr` from strongest to weakest on overall technical merits.
+        - Compare each implementation label and the accepted human PR as candidate solutions to the same task.
+        - Use the parent-to-solution diffs as the primary evidence and identify nuanced differences on your own.
+        - Decide which implementation best matches the accepted PR.
+        - Decide which implementation appears best on its own merits.
+        - Rank every implementation label plus `accepted_pr` from strongest to weakest on overall technical merits.
         - Focus on architectural fit, reuse of existing patterns, duplication risk, and test alignment.
-        - Explain how A differs from the accepted PR, how B differs from the accepted PR, and how A and B differ from each other.
+        - Explain how each implementation differs from the accepted PR and summarize the important differences among the implementations.
         - Output only JSON matching the provided schema.
 
         Task metadata:
@@ -2200,23 +2443,16 @@ def build_judge_prompt(judge_input: dict[str, Any]) -> str:
         {json.dumps(judge_input['evaluation_focus'], indent=2)}
 
         Available judge artifacts:
-        - `{judge_input['implementations']['A']['diff_path']}` is the parent -> Implementation A diff.
-        - `{judge_input['implementations']['B']['diff_path']}` is the parent -> Implementation B diff.
+        {chr(10).join(implementation_refs)}
         - `{judge_input['ground_truth']['diff_path']}` is the parent -> accepted human PR diff.
-        - `{judge_input['implementations']['A']['repo_path']}` is a sanitized export of Implementation A's resulting repo tree.
-        - `{judge_input['implementations']['B']['repo_path']}` is a sanitized export of Implementation B's resulting repo tree.
         - `{judge_input['ground_truth']['repo_path']}` is a sanitized export of the accepted PR's resulting repo tree.
 
         Tooling guidance:
         - You may inspect the diff files and exported repo trees with tools to understand repo context and implementation details.
         - Do not modify files; this is a read-only evaluation task.
-        - Stay blind to which implementation label maps to `control` vs `tg`; use only the blinded artifact labels and paths above.
+        - Stay blind to which implementation label maps to which benchmark variant; use only the blinded artifact labels and paths above.
 
-        Changed-file summary for Implementation A:
-        {json.dumps(judge_input['implementations']['A']['files'], indent=2)}
-
-        Changed-file summary for Implementation B:
-        {json.dumps(judge_input['implementations']['B']['files'], indent=2)}
+        {chr(10).join(summary_blocks)}
 
         Changed-file summary for the accepted PR:
         {json.dumps(judge_input['ground_truth']['files'], indent=2)}
@@ -2238,7 +2474,10 @@ def extract_json_object(text: str) -> Any:
 
 
 def is_judgment_payload(payload: Any) -> bool:
-    return isinstance(payload, dict) and {"better_matches_pr", "better_overall", "scores"} <= set(payload)
+    return isinstance(payload, dict) and (
+        {"better_matches_pr", "better_overall", "scores"} <= set(payload)
+        or {"best_matches_pr", "best_overall", "scores"} <= set(payload)
+    )
 
 
 def is_discovery_payload(payload: Any) -> bool:
@@ -2289,16 +2528,31 @@ def parse_judge_output(text: str) -> dict[str, Any]:
     return payload
 
 
-def validate_judgment(payload: dict[str, Any]) -> None:
+def normalize_judgment(payload: dict[str, Any], labels: list[str]) -> dict[str, Any]:
+    if "best_matches_pr" in payload:
+        return payload
+    normalized = dict(payload)
+    normalized["best_matches_pr"] = payload["better_matches_pr"]
+    normalized["best_overall"] = payload["better_overall"]
+    normalized["differences_vs_pr"] = {
+        label: payload.get(f"{label}_vs_pr_differences", [])
+        for label in labels
+    }
+    normalized["implementation_differences"] = payload.get("A_vs_B_differences", [])
+    return normalized
+
+
+def validate_judgment(payload: dict[str, Any], labels: list[str] | None = None) -> dict[str, Any]:
+    labels = labels or ["A", "B"]
+    payload = normalize_judgment(payload, labels)
     required_top = {
-        "better_matches_pr",
-        "better_overall",
+        "best_matches_pr",
+        "best_overall",
         "overall_ranking",
         "confidence",
         "scores",
-        "A_vs_pr_differences",
-        "B_vs_pr_differences",
-        "A_vs_B_differences",
+        "differences_vs_pr",
+        "implementation_differences",
         "notable_strengths",
         "notable_risks",
         "summary",
@@ -2306,37 +2560,56 @@ def validate_judgment(payload: dict[str, Any]) -> None:
     missing = required_top - set(payload)
     if missing:
         raise ValueError(f"Judgment missing required fields: {sorted(missing)}")
-    if payload["better_matches_pr"] not in {"A", "B", "tie"}:
-        raise ValueError("better_matches_pr must be A, B, or tie")
-    if payload["better_overall"] not in {"A", "B", "tie"}:
-        raise ValueError("better_overall must be A, B, or tie")
+    allowed_winners = set(labels) | {"tie"}
+    if payload["best_matches_pr"] not in allowed_winners:
+        raise ValueError("best_matches_pr must be one of the implementation labels or tie")
+    if payload["best_overall"] not in allowed_winners:
+        raise ValueError("best_overall must be one of the implementation labels or tie")
     ranking = payload["overall_ranking"]
-    if not isinstance(ranking, list) or sorted(ranking) != ["A", "B", "accepted_pr"]:
-        raise ValueError("overall_ranking must contain A, B, and accepted_pr exactly once")
+    expected_ranking = sorted([*labels, "accepted_pr"])
+    if not isinstance(ranking, list) or sorted(ranking) != expected_ranking:
+        raise ValueError("overall_ranking must contain each implementation label and accepted_pr exactly once")
     if payload["confidence"] not in {"low", "medium", "high"}:
         raise ValueError("confidence must be low, medium, or high")
-    for label in ("A", "B"):
+    for label in labels:
         if label not in payload["scores"]:
             raise ValueError(f"scores missing {label}")
         for key in ("pr_alignment", "reuse_alignment", "duplication_risk", "test_alignment"):
             value = payload["scores"][label].get(key)
             if not isinstance(value, int) or not (1 <= value <= 5):
                 raise ValueError(f"{label}.{key} must be an integer between 1 and 5")
-    for key in ("A_vs_pr_differences", "B_vs_pr_differences", "A_vs_B_differences"):
-        if not isinstance(payload[key], list) or not all(isinstance(item, str) for item in payload[key]):
-            raise ValueError(f"{key} must be a list of strings")
+    if not isinstance(payload["differences_vs_pr"], dict):
+        raise ValueError("differences_vs_pr must be an object")
+    for label in labels:
+        value = payload["differences_vs_pr"].get(label)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"differences_vs_pr.{label} must be a list of strings")
+    if not isinstance(payload["implementation_differences"], list) or not all(
+        isinstance(item, str) for item in payload["implementation_differences"]
+    ):
+        raise ValueError("implementation_differences must be a list of strings")
     for key in ("notable_strengths", "notable_risks"):
         if not isinstance(payload[key], dict):
             raise ValueError(f"{key} must be an object")
-        for label in ("A", "B"):
+        for label in labels:
             value = payload[key].get(label)
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 raise ValueError(f"{key}.{label} must be a list of strings")
     if not isinstance(payload["summary"], str):
         raise ValueError("summary must be a string")
+    return payload
 
 
-def run_judge_claude(prompt: str, *, cwd: Path, judge_model: str | None) -> dict[str, Any]:
+def run_judge_claude(
+    prompt: str,
+    *,
+    cwd: Path,
+    judge_model: str | None,
+    schema: dict[str, Any] | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, Any]:
+    labels = labels or ["A", "B"]
+    schema = schema or build_judge_schema(labels)
     require_command("claude")
     command = [
         "claude",
@@ -2344,7 +2617,7 @@ def run_judge_claude(prompt: str, *, cwd: Path, judge_model: str | None) -> dict
         "--output-format",
         "json",
         "--json-schema",
-        json.dumps(JUDGE_SCHEMA),
+        json.dumps(schema),
         "--permission-mode",
         "default",
     ]
@@ -2357,16 +2630,25 @@ def run_judge_claude(prompt: str, *, cwd: Path, judge_model: str | None) -> dict
         input_text=prompt,
     )
     payload = parse_judge_output(completed.stdout)
-    validate_judgment(payload)
+    validate_judgment(payload, labels)
     return payload
 
 
-def run_judge_codex(prompt: str, *, cwd: Path, judge_model: str | None) -> dict[str, Any]:
+def run_judge_codex(
+    prompt: str,
+    *,
+    cwd: Path,
+    judge_model: str | None,
+    schema: dict[str, Any] | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, Any]:
+    labels = labels or ["A", "B"]
+    schema = schema or build_judge_schema(labels)
     require_command("codex")
     with tempfile.TemporaryDirectory(prefix="tracegrep-eval-schema-") as tmpdir:
         schema_path = Path(tmpdir) / "judge_schema.json"
         output_path = Path(tmpdir) / "judgment_output.json"
-        write_json(schema_path, JUDGE_SCHEMA)
+        write_json(schema_path, schema)
         command = [
             "codex",
             "exec",
@@ -2399,7 +2681,7 @@ def run_judge_codex(prompt: str, *, cwd: Path, judge_model: str | None) -> dict[
         else:
             raw = completed.stdout
     payload = parse_judge_output(raw)
-    validate_judgment(payload)
+    validate_judgment(payload, labels)
     return payload
 
 
@@ -2409,11 +2691,13 @@ def run_judge_agent(
     *,
     cwd: Path,
     judge_model: str | None,
+    labels: list[str],
 ) -> dict[str, Any]:
+    schema = build_judge_schema(labels)
     if judge_agent == "claude":
-        return run_judge_claude(prompt, cwd=cwd, judge_model=judge_model)
+        return run_judge_claude(prompt, cwd=cwd, judge_model=judge_model, schema=schema, labels=labels)
     if judge_agent == "codex":
-        return run_judge_codex(prompt, cwd=cwd, judge_model=judge_model)
+        return run_judge_codex(prompt, cwd=cwd, judge_model=judge_model, schema=schema, labels=labels)
     raise SystemExit(f"Unsupported judge agent: {judge_agent}")
 
 
@@ -2423,10 +2707,16 @@ def normalize_publish_metadata(payload: Any) -> dict[str, Any] | None:
     return payload
 
 
+def format_variant_name(variant: str) -> str:
+    if variant.endswith(VARIANT_REVIEW_SUFFIX):
+        return f"{variant[: -len(VARIANT_REVIEW_SUFFIX)]} + review"
+    return variant
+
+
 def reveal_winner(label: str, blind_manifest: dict[str, Any]) -> str:
     if label == "tie":
         return "tie"
-    return blind_manifest["label_to_condition"][label]
+    return manifest_label_to_variant(blind_manifest)[label]
 
 
 def reveal_ranking_item(label: str, blind_manifest: dict[str, Any]) -> str:
@@ -2437,45 +2727,46 @@ def reveal_ranking_item(label: str, blind_manifest: dict[str, Any]) -> str:
 
 def overall_ranking_labels(judgment: dict[str, Any]) -> list[str]:
     ranking = judgment.get("overall_ranking")
-    if isinstance(ranking, list) and sorted(ranking) == ["A", "B", "accepted_pr"]:
+    if isinstance(ranking, list) and "accepted_pr" in ranking:
         return ranking
-    winner = judgment.get("better_overall")
-    if winner == "A":
-        return ["accepted_pr", "A", "B"]
-    if winner == "B":
-        return ["accepted_pr", "B", "A"]
-    return ["accepted_pr", "A", "B"]
+    score_labels = sorted(label for label in judgment.get("scores", {}) if label != "accepted_pr")
+    winner = judgment.get("best_overall") or judgment.get("better_overall")
+    if winner and winner != "tie" and winner in score_labels:
+        return ["accepted_pr", winner, *(label for label in score_labels if label != winner)]
+    if score_labels:
+        return ["accepted_pr", *score_labels]
+    return ["accepted_pr"]
 
 
 def best_of_all_three(judgment: dict[str, Any], blind_manifest: dict[str, Any]) -> str:
     return reveal_ranking_item(overall_ranking_labels(judgment)[0], blind_manifest)
 
 
-def condition_scores(judgment: dict[str, Any], blind_manifest: dict[str, Any]) -> dict[str, dict[str, int]]:
-    label_for = blind_manifest["condition_to_label"]
+def variant_scores(judgment: dict[str, Any], blind_manifest: dict[str, Any]) -> dict[str, dict[str, int]]:
+    label_for = manifest_variant_to_label(blind_manifest)
     return {
-        condition: judgment["scores"][label_for[condition]]
-        for condition in SUPPORTED_CONDITIONS
+        variant: judgment["scores"][label_for[variant]]
+        for variant in manifest_variants(blind_manifest)
     }
 
 
-def condition_list(judgment: dict[str, Any], blind_manifest: dict[str, Any], key: str) -> dict[str, list[str]]:
-    label_for = blind_manifest["condition_to_label"]
+def variant_differences_vs_pr(judgment: dict[str, Any], blind_manifest: dict[str, Any]) -> dict[str, list[str]]:
+    label_for = manifest_variant_to_label(blind_manifest)
     return {
-        condition: judgment[f"{label_for[condition]}{key}"]
-        for condition in SUPPORTED_CONDITIONS
+        variant: judgment["differences_vs_pr"][label_for[variant]]
+        for variant in manifest_variants(blind_manifest)
     }
 
 
-def condition_nested_list(
+def variant_nested_list(
     judgment: dict[str, Any],
     blind_manifest: dict[str, Any],
     section: str,
 ) -> dict[str, list[str]]:
-    label_for = blind_manifest["condition_to_label"]
+    label_for = manifest_variant_to_label(blind_manifest)
     return {
-        condition: judgment[section][label_for[condition]]
-        for condition in SUPPORTED_CONDITIONS
+        variant: judgment[section][label_for[variant]]
+        for variant in manifest_variants(blind_manifest)
     }
 
 
@@ -2492,18 +2783,19 @@ def copy_report_session_logs(
     evaluated_agent: str,
     eval_id: str,
     report_path: Path,
+    variants: list[str],
 ) -> dict[str, str | None]:
     links: dict[str, str | None] = {}
-    for condition in SUPPORTED_CONDITIONS:
-        source = session_log_path(root, task_id, evaluated_agent, eval_id, condition)
-        target = report_session_log_path(root, task_id, evaluated_agent, eval_id, condition)
+    for variant in variants:
+        source = session_log_path(root, task_id, evaluated_agent, eval_id, variant)
+        target = report_session_log_path(root, task_id, evaluated_agent, eval_id, variant)
         if source.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
-            links[condition] = str(target.relative_to(report_path.parent))
+            links[variant] = str(target.relative_to(report_path.parent))
             continue
         target.unlink(missing_ok=True)
-        links[condition] = None
+        links[variant] = None
     return links
 
 
@@ -2519,65 +2811,74 @@ def build_report_judge_section(
     judgment: dict[str, Any],
     blind_manifest: dict[str, Any],
 ) -> list[str]:
-    scores = condition_scores(judgment, blind_manifest)
-    differences_vs_pr = condition_list(judgment, blind_manifest, "_vs_pr_differences")
-    strengths = condition_nested_list(judgment, blind_manifest, "notable_strengths")
-    risks = condition_nested_list(judgment, blind_manifest, "notable_risks")
-    overall_winner = reveal_winner(judgment["better_overall"], blind_manifest)
-    best_three = best_of_all_three(judgment, blind_manifest)
-    pr_winner = reveal_winner(judgment["better_matches_pr"], blind_manifest)
+    labels = blind_labels(len(manifest_variants(blind_manifest)))
+    normalized = normalize_judgment(judgment, labels)
+    scores = variant_scores(normalized, blind_manifest)
+    differences_vs_pr = variant_differences_vs_pr(normalized, blind_manifest)
+    strengths = variant_nested_list(normalized, blind_manifest, "notable_strengths")
+    risks = variant_nested_list(normalized, blind_manifest, "notable_risks")
+    overall_winner = reveal_winner(normalized["best_overall"], blind_manifest)
+    best_variant = best_of_all_three(normalized, blind_manifest)
+    pr_winner = reveal_winner(normalized["best_matches_pr"], blind_manifest)
     overall_ranking = " > ".join(
-        f"`{reveal_ranking_item(label, blind_manifest)}`" for label in overall_ranking_labels(judgment)
+        f"`{reveal_ranking_item(label, blind_manifest)}`" for label in overall_ranking_labels(normalized)
     )
-    control_vs_tg = judgment["A_vs_B_differences"]
-    score_rows = "\n".join(
-        [
-            "| Condition | PR Alignment | Reuse Alignment | Duplication Risk | Test Alignment |",
-            "| --- | ---: | ---: | ---: | ---: |",
-            f"| control | {scores['control']['pr_alignment']} | {scores['control']['reuse_alignment']} | {scores['control']['duplication_risk']} | {scores['control']['test_alignment']} |",
-            f"| tg | {scores['tg']['pr_alignment']} | {scores['tg']['reuse_alignment']} | {scores['tg']['duplication_risk']} | {scores['tg']['test_alignment']} |",
-        ]
-    )
-    return [
+    score_rows = [
+        "| Variant | PR Alignment | Reuse Alignment | Duplication Risk | Test Alignment |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for variant in manifest_variants(blind_manifest):
+        score_rows.append(
+            f"| {format_variant_name(variant)} | {scores[variant]['pr_alignment']} | {scores[variant]['reuse_alignment']} | {scores[variant]['duplication_risk']} | {scores[variant]['test_alignment']} |"
+        )
+    lines = [
         f"## Judge Result: {judge_agent}",
         "",
         "### Blind Verdict Summary",
         f"- Better matches the accepted PR: `{pr_winner}`",
-        f"- Better overall (`control` vs `tg`): `{overall_winner}`",
-        f"- Best of all three: `{best_three}`",
+        (
+            f"- Better overall (`control` vs `tg`): `{overall_winner}`"
+            if is_classic_variant_pair(manifest_variants(blind_manifest))
+            else f"- Better overall: `{overall_winner}`"
+        ),
+        (
+            f"- Best of all three: `{best_variant}`"
+            if is_classic_variant_pair(manifest_variants(blind_manifest))
+            else f"- Best implementation among benchmark variants: `{best_variant}`"
+        ),
         f"- Overall ranking: {overall_ranking}",
-        f"- Judge confidence: `{judgment['confidence']}`",
+        f"- Judge confidence: `{normalized['confidence']}`",
         "",
         "### Score Table",
-        score_rows,
-        "",
-        "### Control vs Human PR",
-        "#### Key differences",
-        format_bullets(differences_vs_pr["control"]),
-        "",
-        "#### Strengths",
-        format_bullets(strengths["control"]),
-        "",
-        "#### Risks",
-        format_bullets(risks["control"]),
-        "",
-        "### TG vs Human PR",
-        "#### Key differences",
-        format_bullets(differences_vs_pr["tg"]),
-        "",
-        "#### Strengths",
-        format_bullets(strengths["tg"]),
-        "",
-        "#### Risks",
-        format_bullets(risks["tg"]),
-        "",
-        "### Control vs TG",
-        format_bullets(control_vs_tg),
-        "",
-        "### Final Summary",
-        judgment["summary"],
+        "\n".join(score_rows),
         "",
     ]
+    for variant in manifest_variants(blind_manifest):
+        lines.extend(
+            [
+                f"### {format_variant_name(variant)} vs Human PR",
+                "#### Key differences",
+                format_bullets(differences_vs_pr[variant]),
+                "",
+                "#### Strengths",
+                format_bullets(strengths[variant]),
+                "",
+                "#### Risks",
+                format_bullets(risks[variant]),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "### Cross-Implementation Differences",
+            format_bullets(normalized["implementation_differences"]),
+            "",
+        "### Final Summary",
+        normalized["summary"],
+        "",
+        ]
+    )
+    return lines
 
 
 def build_report_markdown(
@@ -2599,52 +2900,56 @@ def build_report_markdown(
         judgments = {judge_agent: judgment}
 
     judge_agents = ordered_judge_agents(list(judgments))
+    variants = manifest_variants(blind_manifest)
     link_section = [
         "Publishing has not been run yet for this evaluation.",
         "",
         "Public branch publishing can contaminate future benchmarks, so publish only after the evaluation is complete.",
     ]
-    control_branch_link = "n/a"
-    tg_branch_link = "n/a"
     if publish_meta and publish_meta.get("published") and "branches" in publish_meta:
         branches = publish_meta["branches"]
-        compares = publish_meta["compare_urls"]
-        control_branch_link = markdown_link("control branch", branches["control"]["url"])
-        tg_branch_link = markdown_link("tg branch", branches["tg"]["url"])
-        link_section = [
-            f"- Fork: {markdown_link(publish_meta['fork']['name_with_owner'], publish_meta['fork']['url'])}",
-            f"- Control: {control_branch_link}",
-            f"- TG: {tg_branch_link}",
-            f"- Control vs pre-fix: {markdown_link('compare', compares.get('control_vs_pre_fix'))}",
-            f"- TG vs pre-fix: {markdown_link('compare', compares.get('tg_vs_pre_fix'))}",
-            f"- Control vs TG: {markdown_link('compare', compares.get('control_vs_tg'))}",
-            "",
-            "Public branch publishing can contaminate future benchmarks, so these links should be generated only after the run is complete.",
-        ]
+        compare_urls = publish_meta.get("compare_urls", {})
+        link_section = [f"- Fork: {markdown_link(publish_meta['fork']['name_with_owner'], publish_meta['fork']['url'])}"]
+        for variant in variants:
+            branch = branches.get(variant, {})
+            link_section.append(
+                f"- {format_variant_name(variant)} branch: {markdown_link(f'{format_variant_name(variant)} branch', branch.get('url'))}"
+            )
+            link_section.append(f"- {format_variant_name(variant)} vs pre-fix: {markdown_link('compare', compare_urls.get(f'{variant}_vs_pre_fix'))}")
+        link_section.extend(
+            [
+                "",
+                "Public branch publishing can contaminate future benchmarks, so these links should be generated only after the run is complete.",
+            ]
+        )
+        if is_classic_variant_pair(variants) and compare_urls.get("control_vs_tg"):
+            link_section.insert(-2, f"- Control vs TG: {markdown_link('compare', compare_urls.get('control_vs_tg'))}")
 
     report_rel = str(report_path) if report_path else "n/a"
     session_log_links = session_log_links or {}
     mapping_rows = "\n".join(
-        [
-            "| Label | Condition |",
-            "| --- | --- |",
-            f"| A | {blind_manifest['label_to_condition']['A']} |",
-            f"| B | {blind_manifest['label_to_condition']['B']} |",
+        ["| Label | Variant |", "| --- | --- |"]
+        + [
+            f"| {label} | {format_variant_name(variant)} |"
+            for label, variant in manifest_label_to_variant(blind_manifest).items()
         ]
     )
+    summary_best_heading = "Best implementation"
+    if is_classic_variant_pair(variants):
+        summary_best_heading = "Best of all three"
     summary_rows = [
-        "| Judge | Better vs PR | Better overall (control vs tg) | Best of all three | Confidence |",
+        f"| Judge | Better vs PR | Better overall | {summary_best_heading} | Confidence |",
         "| --- | --- | --- | --- | --- |",
     ]
     for agent in judge_agents:
-        judge_payload = judgments[agent]
+        judge_payload = normalize_judgment(judgments[agent], blind_labels(len(variants)))
         summary_rows.append(
             "| "
             + " | ".join(
                 [
                     agent,
-                    reveal_winner(judge_payload["better_matches_pr"], blind_manifest),
-                    reveal_winner(judge_payload["better_overall"], blind_manifest),
+                    reveal_winner(judge_payload["best_matches_pr"], blind_manifest),
+                    reveal_winner(judge_payload["best_overall"], blind_manifest),
                     best_of_all_three(judge_payload, blind_manifest),
                     judge_payload["confidence"],
                 ]
@@ -2672,16 +2977,22 @@ def build_report_markdown(
         mapping_rows,
         "",
         "## Judge Summary",
+        (
+            "_Columns: Better vs PR | Better overall (`control` vs `tg`) | Best of all three | Confidence_"
+            if is_classic_variant_pair(variants)
+            else "_Columns: Better vs PR | Better overall | Best implementation | Confidence_"
+        ),
+        "",
         "\n".join(summary_rows),
         "",
         "## Published GitHub Links",
         "\n".join(link_section),
         "",
         "## Agent Event Logs",
-        f"- Control: {markdown_link('jsonl', session_log_links.get('control'))}",
-        f"- TG: {markdown_link('jsonl', session_log_links.get('tg'))}",
-        "",
     ]
+    for variant in variants:
+        lines.append(f"- {format_variant_name(variant)}: {markdown_link('jsonl', session_log_links.get(variant))}")
+    lines.append("")
     for agent in judge_agents:
         lines.extend(build_report_judge_section(judge_agent=agent, judgment=judgments[agent], blind_manifest=blind_manifest))
     return "\n".join(lines)
@@ -2699,29 +3010,32 @@ def build_matrix_entry(
     report_path: Path,
     root: Path,
 ) -> dict[str, Any]:
-    scores = condition_scores(judgment, blind_manifest)
+    labels = blind_labels(len(manifest_variants(blind_manifest)))
+    normalized = normalize_judgment(judgment, labels)
+    scores = variant_scores(normalized, blind_manifest)
     branches = publish_meta["branches"] if publish_meta else {}
     try:
         report_ref = str(report_path.relative_to(root.parent))
     except ValueError:
         report_ref = str(report_path)
+    variant_summaries = {
+        variant: {
+            **scores[variant],
+            "branch_url": branches.get(variant, {}).get("url"),
+        }
+        for variant in manifest_variants(blind_manifest)
+    }
     return {
         "task_id": task["id"],
         "evaluated_agent": evaluated_agent,
         "judge_agent": judge_agent,
         "eval_id": eval_id,
-        "better_matches_pr": reveal_winner(judgment["better_matches_pr"], blind_manifest),
-        "better_overall_pair": reveal_winner(judgment["better_overall"], blind_manifest),
-        "best_of_all_three": best_of_all_three(judgment, blind_manifest),
-        "confidence": judgment["confidence"],
-        "control_pr_alignment": scores["control"]["pr_alignment"],
-        "tg_pr_alignment": scores["tg"]["pr_alignment"],
-        "control_reuse_alignment": scores["control"]["reuse_alignment"],
-        "tg_reuse_alignment": scores["tg"]["reuse_alignment"],
-        "control_duplication_risk": scores["control"]["duplication_risk"],
-        "tg_duplication_risk": scores["tg"]["duplication_risk"],
-        "control_branch_url": branches.get("control", {}).get("url"),
-        "tg_branch_url": branches.get("tg", {}).get("url"),
+        "variant_count": len(variant_summaries),
+        "best_matches_pr": reveal_winner(normalized["best_matches_pr"], blind_manifest),
+        "best_overall": reveal_winner(normalized["best_overall"], blind_manifest),
+        "best_variant": best_of_all_three(normalized, blind_manifest),
+        "confidence": normalized["confidence"],
+        "variant_summaries": variant_summaries,
         "report_path": report_ref,
     }
 
@@ -2730,8 +3044,8 @@ def build_matrix_markdown(entries: list[dict[str, Any]]) -> str:
     lines = [
         "# Benchmark Matrix",
         "",
-        "| Task | Agent | Judge | Better vs PR | Better overall (control vs tg) | Best of all three | PR align control | PR align tg | Reuse control | Reuse tg | Duplication risk control | Duplication risk tg | Confidence | Control branch | TG branch | Report |",
-        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+        "| Task | Agent | Judge | Variants | Better vs PR | Better overall | Best variant | Confidence | Report |",
+        "| --- | --- | --- | ---: | --- | --- | --- | --- | --- |",
     ]
     for entry in entries:
         lines.append(
@@ -2741,27 +3055,38 @@ def build_matrix_markdown(entries: list[dict[str, Any]]) -> str:
                     entry["task_id"],
                     entry["evaluated_agent"],
                     entry["judge_agent"],
-                    entry["better_matches_pr"],
-                    entry["better_overall_pair"],
-                    entry["best_of_all_three"],
-                    str(entry["control_pr_alignment"]),
-                    str(entry["tg_pr_alignment"]),
-                    str(entry["control_reuse_alignment"]),
-                    str(entry["tg_reuse_alignment"]),
-                    str(entry["control_duplication_risk"]),
-                    str(entry["tg_duplication_risk"]),
+                    str(entry["variant_count"]),
+                    entry["best_matches_pr"],
+                    entry["best_overall"],
+                    entry["best_variant"],
                     entry["confidence"],
-                    markdown_link("control", entry["control_branch_url"]),
-                    markdown_link("tg", entry["tg_branch_url"]),
                     entry["report_path"],
                 ]
             )
             + " |"
         )
+        lines.append("")
+        lines.append("| Variant | PR align | Reuse | Duplication | Tests | Branch |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | --- |")
+        for variant, summary in entry["variant_summaries"].items():
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        format_variant_name(variant),
+                        str(summary["pr_alignment"]),
+                        str(summary["reuse_alignment"]),
+                        str(summary["duplication_risk"]),
+                        str(summary["test_alignment"]),
+                        markdown_link("branch", summary["branch_url"]),
+                    ]
+                )
+                + " |"
+            )
     lines.extend(
         [
             "",
-            "_How to read this table: higher 1-5 scores are better. `PR align` measures closeness to the accepted PR, `Reuse` measures alignment with existing code patterns, and `Duplication risk` reflects how well the implementation avoids unnecessary duplication. `Better overall (control vs tg)` is the head-to-head winner between the two benchmark implementations, while `Best of all three` can also be `accepted_pr`._",
+            "_How to read this table: higher 1-5 scores are better. `PR align` measures closeness to the accepted PR, `Reuse` measures alignment with existing code patterns, and `Duplication` reflects how well the implementation avoids unnecessary duplication. For classic two-variant runs, `Best variant` is the same idea as the earlier `Best of all three` summary and can still be `accepted_pr` when the human PR is strongest overall._",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -2789,6 +3114,7 @@ def render_report_for_eval(
         evaluated_agent=evaluated_agent,
         eval_id=eval_dir.name,
         report_path=report_path,
+        variants=manifest_variants(blind_manifest),
     )
     report = build_report_markdown(
         task=task,
@@ -2841,7 +3167,14 @@ def cmd_judge(
             eval_id=eval_id_value,
         )
         prompt = initialized["prompt"]
-    judgment = run_judge_agent(judge_agent, prompt, cwd=eval_path, judge_model=judge_model)
+    labels = blind_labels(len(manifest_variants(load_json(eval_path / "blind_manifest.json"))))
+    judgment = run_judge_agent(
+        judge_agent,
+        prompt,
+        cwd=eval_path,
+        judge_model=judge_model,
+        labels=labels,
+    )
     judgment["judge_agent"] = judge_agent
     if judge_model is not None:
         judgment["judge_model"] = judge_model
@@ -2944,24 +3277,22 @@ def cmd_publish(
     eval_path = resolve_eval_dir(root, task_id, evaluated_agent, eval_id)
     blind_manifest = load_json(eval_path / "blind_manifest.json")
     snapshot_commits = blind_manifest["snapshot_commits"]
+    variants = manifest_variants(blind_manifest)
     fork = ensure_fork_repo(task)
     cache_dir = ensure_repo_cache(root, task)
     remote_name = f"{DEFAULT_FORK_OWNER}-fork"
     ensure_remote(cache_dir, remote_name, fork["git_url"])
-    branches = branch_names(task_id, evaluated_agent, eval_path.name)
-    for condition in SUPPORTED_CONDITIONS:
-        worktree = worktree_dir(root, task_id, condition)
-        if not worktree.exists():
-            raise SystemExit(f"Worktree missing for {condition}: {worktree}")
+    branches = branch_names(task_id, evaluated_agent, eval_path.name, variants)
+    for variant in variants:
         run(
             [
                 "git",
                 "push",
                 "--force",
                 remote_name,
-                f"{snapshot_commits[condition]}:refs/heads/{branches[condition]}",
+                f"{snapshot_commits[variant]}:refs/heads/{branches[variant]}",
             ],
-            cwd=worktree,
+            cwd=cache_dir,
         )
     fork_url = fork["url"]
     publish_meta = {
@@ -2971,32 +3302,29 @@ def cmd_publish(
         "upstream_repo": task["repo"]["name"],
         "ground_truth": task["ground_truth"],
         "branches": {
-            condition: {
-                "name": branches[condition],
-                "url": branch_url(fork_url, branches[condition]),
-                "commit": snapshot_commits[condition],
+            variant: {
+                "name": branches[variant],
+                "url": branch_url(fork_url, branches[variant]),
+                "commit": snapshot_commits[variant],
             }
-            for condition in SUPPORTED_CONDITIONS
+            for variant in variants
         },
         "compare_urls": {
-            "control_vs_pre_fix": compare_url(
+            f"{variant}_vs_pre_fix": compare_url(
                 fork_url,
                 task["ground_truth"]["pre_fix_commit"],
-                branches["control"],
-            ),
-            "tg_vs_pre_fix": compare_url(
-                fork_url,
-                task["ground_truth"]["pre_fix_commit"],
-                branches["tg"],
-            ),
-            "control_vs_tg": compare_url(
-                fork_url,
-                branches["control"],
-                branches["tg"],
-            ),
+                branches[variant],
+            )
+            for variant in variants
         },
         "warning": "Public branch publishing can contaminate future benchmarks. These branches should only be created after evaluation is complete.",
     }
+    if is_classic_variant_pair(variants):
+        publish_meta["compare_urls"]["control_vs_tg"] = compare_url(
+            fork_url,
+            branches["control"],
+            branches["tg"],
+        )
     write_json(eval_path / "publish.json", publish_meta)
     report_path = render_report_for_eval(
         task=task,
@@ -3118,17 +3446,23 @@ def cmd_run_task(
     agent_model: str | None,
     judge_agents: list[str],
     judge_model: str | None,
+    review_pass: bool = False,
+    review_model: str | None = None,
     force: bool,
     extra_args: list[str],
 ) -> int:
     task = tasks[task_id]
     eval_id = new_eval_id()
+    eval_path = evaluation_dir(root, task_id, evaluated_agent, eval_id)
     build_args = forwarded_build_args(extra_args, agent_model)
-    total_steps = 6 + len(judge_agents)
+    total_steps = 6 + len(judge_agents) + (4 if review_pass else 0)
     step = 1
+    snapshot_commits: dict[str, str] = {}
+    pre_fix = task["ground_truth"]["pre_fix_commit"]
 
     print(f"[{step}/{total_steps}] preparing {task_id}")
     prepare_task(root, task, force=force)
+    eval_path.mkdir(parents=True, exist_ok=False)
     step += 1
 
     for condition in SUPPORTED_CONDITIONS:
@@ -3147,7 +3481,57 @@ def cmd_run_task(
         if result != 0:
             print(f"stopping after {condition} launch failed with exit code {result}")
             return result
+        snapshot_commits[condition] = snapshot_worktree_commit(
+            worktree_dir(root, task_id, condition),
+            pre_fix,
+            f"Benchmark snapshot for {task_id} {evaluated_agent} {condition} {eval_id}",
+        )
         step += 1
+
+        if review_pass:
+            print(f"[{step}/{total_steps}] reviewing {condition} with claude")
+            review_feedback = run_review_claude(
+                build_review_prompt(task, condition, base_commit=pre_fix),
+                cwd=worktree_dir(root, task_id, condition),
+                review_model=review_model,
+            )
+            write_json(review_feedback_path(eval_path, condition), review_feedback)
+            step += 1
+
+            review_prompt = review_prompt_path(root, task_id, condition)
+            write_text(review_prompt, build_review_address_prompt(task, condition, review_feedback))
+            review_variant = reviewed_variant_name(condition)
+            print(f"[{step}/{total_steps}] addressing review for {condition}")
+            result = cmd_launch(
+                tasks,
+                task_id,
+                root,
+                agent=evaluated_agent,
+                condition=condition,
+                prepare=False,
+                force=False,
+                extra_args=build_args,
+                session_log_file=session_log_path(root, task_id, evaluated_agent, eval_id, review_variant),
+                prompt_override=review_prompt,
+            )
+            if result != 0:
+                print(f"stopping after review addressing for {condition} failed with exit code {result}")
+                return result
+            snapshot_commits[review_variant] = snapshot_worktree_commit(
+                worktree_dir(root, task_id, condition),
+                pre_fix,
+                f"Benchmark snapshot for {task_id} {evaluated_agent} {review_variant} {eval_id}",
+            )
+            step += 1
+
+    initialize_eval_run(
+        task=task,
+        root=root,
+        evaluated_agent=evaluated_agent,
+        eval_dir=eval_path,
+        eval_id=eval_id,
+        snapshot_commits=snapshot_commits,
+    )
 
     for judge_agent in judge_agents:
         print(f"[{step}/{total_steps}] judging {task_id} with {judge_agent}")
@@ -3319,6 +3703,15 @@ def build_parser(task_ids: list[str]) -> argparse.ArgumentParser:
         "--judge-model",
         help="Judge model override. Only valid when run-task is using a single judge.",
     )
+    run_task_parser.add_argument(
+        "--review-pass",
+        action="store_true",
+        help="Run a Claude code review and a second address-the-review iteration for each benchmark variant.",
+    )
+    run_task_parser.add_argument(
+        "--review-model",
+        help="Claude model override for the optional review pass.",
+    )
     run_task_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     run_task_parser.add_argument("--force", action="store_true", help="Recreate generated worktrees during prepare.")
 
@@ -3434,6 +3827,8 @@ def main() -> int:
             agent_model=args.agent_model,
             judge_agents=default_run_task_judge_agents(args.judge_agent, args.judge_model),
             judge_model=args.judge_model,
+            review_pass=args.review_pass,
+            review_model=args.review_model,
             force=args.force,
             extra_args=extra_args,
         )
