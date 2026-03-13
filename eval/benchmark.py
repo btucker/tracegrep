@@ -19,9 +19,10 @@ import sys
 import tarfile
 import tempfile
 import textwrap
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import quote, urlencode
 
 try:
@@ -53,6 +54,7 @@ TRACEGREP_SKILL_SOURCE = SCRIPT_DIR.parent / "skills" / "tracegrep"
 BENCHMARK_EXPORT_NAME = "tracegrep-eval"
 BENCHMARK_EXPORT_EMAIL = "tracegrep-eval@example.com"
 WORKTREE_SNAPSHOT_EXCLUDES = (".codex", ".claude", ".eval-bin", ".tracegrep-cache")
+CODEX_HOME_BASELINE_FILES = ("auth.json", "config.toml")
 
 JUDGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -315,6 +317,10 @@ def local_tg_path(worktree: Path) -> Path:
     return worktree / ".eval-bin" / "tg"
 
 
+def local_tracegrep_path(worktree: Path) -> Path:
+    return worktree / ".eval-bin" / "tracegrep"
+
+
 def local_cache_root(worktree: Path) -> Path:
     return worktree / ".tracegrep-cache"
 
@@ -438,6 +444,46 @@ def require_command(name: str) -> str:
     return path
 
 
+def codex_home_source_dir() -> Path:
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".codex"
+
+
+def copy_codex_home_baseline(target_dir: Path) -> None:
+    source_dir = codex_home_source_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for name in CODEX_HOME_BASELINE_FILES:
+        source = source_dir / name
+        if source.exists():
+            shutil.copy2(source, target_dir / name)
+
+
+@contextmanager
+def isolated_codex_environment() -> Iterator[dict[str, str]]:
+    with tempfile.TemporaryDirectory(prefix="tracegrep-codex-home-") as tmpdir:
+        target_dir = Path(tmpdir)
+        copy_codex_home_baseline(target_dir)
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(target_dir)
+        if not (target_dir / "auth.json").exists() and not env.get("OPENAI_API_KEY"):
+            raise SystemExit(
+                f"Codex auth not found in {codex_home_source_dir() / 'auth.json'} and OPENAI_API_KEY is not set"
+            )
+        yield env
+
+
+def write_blocked_tracegrep_binary(path: Path, command_name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "{command_name} is disabled in the control condition" >&2\n'
+        "exit 127\n"
+    )
+    path.chmod(0o755)
+
+
 def write_claude_settings(path: Path) -> None:
     settings = {
         "$schema": "https://json.schemastore.org/claude-code-settings.json",
@@ -461,6 +507,7 @@ def configure_condition_environment(worktree: Path, condition: str) -> None:
     codex_skill_dir = worktree / ".codex" / "skills" / "tracegrep"
     claude_settings_path = worktree / ".claude" / "settings.local.json"
     tg_binary_path = local_tg_path(worktree)
+    tracegrep_binary_path = local_tracegrep_path(worktree)
     cache_root = local_cache_root(worktree)
 
     write_worktree_excludes(worktree)
@@ -476,13 +523,15 @@ def configure_condition_environment(worktree: Path, condition: str) -> None:
         tg_binary_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(host_tg_binary(), tg_binary_path)
         tg_binary_path.chmod(0o755)
+        remove_tree(tracegrep_binary_path)
         cache_root.mkdir(parents=True, exist_ok=True)
         return
 
     remove_tree(codex_skill_dir)
     if claude_settings_path.exists():
         claude_settings_path.unlink()
-    remove_tree(tg_binary_path)
+    write_blocked_tracegrep_binary(tg_binary_path, "tg")
+    write_blocked_tracegrep_binary(tracegrep_binary_path, "tracegrep")
     remove_tree(cache_root)
 
 
@@ -618,11 +667,31 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
     preflight_lines: list[str] = []
     env_setup_lines: list[str] = []
     warmup_lines: list[str] = []
+    if agent == "codex":
+        codex_home_source = codex_home_source_dir()
+        env_setup_lines.extend(
+            [
+                'CODEX_HOME_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tracegrep-codex-home.XXXXXX")"',
+                'cleanup_codex_home() { rm -rf "$CODEX_HOME_TMP"; }',
+                "trap cleanup_codex_home EXIT",
+                'export CODEX_HOME="$CODEX_HOME_TMP"',
+            ]
+        )
+        for name in CODEX_HOME_BASELINE_FILES:
+            source = codex_home_source / name
+            if source.exists():
+                env_setup_lines.append(f'cp {shlex.quote(str(source))} "$CODEX_HOME/{name}"')
+        if not (codex_home_source / "auth.json").exists() and not os.environ.get("OPENAI_API_KEY"):
+            preflight_lines.extend(
+                [
+                    f'echo "Codex auth not found at {shlex.quote(str(codex_home_source / "auth.json"))}" >&2',
+                    'echo "Set OPENAI_API_KEY or sign in with codex login before running the benchmark." >&2',
+                    "exit 1",
+                ]
+            )
+    env_setup_lines.append(f'export PATH="{tg_path.parent}:$PATH"')
     if condition == "tg":
-        env_setup_lines = [
-            f'export PATH="{tg_path.parent}:$PATH"',
-            f'export TRACEGREP_CACHE_DIR="{cache_root}"',
-        ]
+        env_setup_lines.append(f'export TRACEGREP_CACHE_DIR="{cache_root}"')
         warmup_lines = [
             'echo "Prebuilding tracegrep index in $WORKTREE..."',
             "tg --build-index",
@@ -1798,7 +1867,8 @@ def run_discovery_codex(prompt: str, *, cwd: Path, model: str | None) -> dict[st
         if model:
             command.extend(["--model", model])
         command.append("-")
-        completed = run(command, cwd=cwd, capture_output=True, input_text=prompt)
+        with isolated_codex_environment() as env:
+            completed = run(command, cwd=cwd, capture_output=True, input_text=prompt, env=env)
         raw = output_path.read_text() if output_path.exists() else completed.stdout
     payload = parse_judge_output(raw)
     if not isinstance(payload, dict):
@@ -2281,12 +2351,14 @@ def run_judge_codex(prompt: str, *, cwd: Path, judge_model: str | None) -> dict[
         if judge_model:
             command.extend(["--model", judge_model])
         command.append("-")
-        completed = run(
-            command,
-            cwd=cwd,
-            capture_output=True,
-            input_text=prompt,
-        )
+        with isolated_codex_environment() as env:
+            completed = run(
+                command,
+                cwd=cwd,
+                capture_output=True,
+                input_text=prompt,
+                env=env,
+            )
         if output_path.exists():
             raw = output_path.read_text()
         else:

@@ -191,10 +191,18 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertIn("Do not run `git fetch`, `git pull`, `git checkout`", prompt)
 
     def test_build_launcher_script_uses_headless_codex_exec(self) -> None:
-        script = benchmark.build_launcher_script(self.task, Path("/tmp/root"), "codex", "control")
+        with tempfile.TemporaryDirectory() as codex_home:
+            codex_home_path = Path(codex_home)
+            (codex_home_path / "auth.json").write_text("{}")
+            (codex_home_path / "config.toml").write_text('model = "gpt-5"\n')
+            with mock.patch.dict("os.environ", {"CODEX_HOME": str(codex_home_path)}, clear=False):
+                script = benchmark.build_launcher_script(self.task, Path("/tmp/root"), "codex", "control")
 
         self.assertIn('exec codex exec --full-auto --skip-git-repo-check "$@" - < "$PROMPT_FILE"', script)
         self.assertNotIn('exec codex --full-auto "$@" "$(cat "$PROMPT_FILE")"', script)
+        self.assertIn('export CODEX_HOME="$CODEX_HOME_TMP"', script)
+        self.assertIn(f'cp {codex_home_path / "auth.json"} "$CODEX_HOME/auth.json"', script)
+        self.assertIn('export PATH="/tmp/root/runs/demo-task/worktrees/control/.eval-bin:$PATH"', script)
 
     def test_build_launcher_script_uses_headless_claude_print_mode(self) -> None:
         script = benchmark.build_launcher_script(self.task, Path("/tmp/root"), "claude", "control")
@@ -204,6 +212,7 @@ class BenchmarkHarnessTests(unittest.TestCase):
             script,
         )
         self.assertNotIn('exec claude "$@" "$(cat "$PROMPT_FILE")"', script)
+        self.assertIn('export PATH="/tmp/root/runs/demo-task/worktrees/control/.eval-bin:$PATH"', script)
 
     def test_build_discovery_shortlist_preserves_candidate_metadata(self) -> None:
         shortlist = benchmark.build_discovery_shortlist(
@@ -897,18 +906,43 @@ class BenchmarkHarnessTests(unittest.TestCase):
         def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             output_path = Path(args[args.index("-o") + 1])
             output_path.write_text(json.dumps(self.example_judgment()))
+            env = kwargs.get("env")
+            assert isinstance(env, dict)
+            codex_home = Path(env["CODEX_HOME"])
+            assert codex_home.exists()
+            assert (codex_home / "auth.json").exists()
+            assert (codex_home / "config.toml").exists()
             return subprocess.CompletedProcess(args, 0, stdout="")
 
-        with (
-            mock.patch.object(benchmark, "require_command"),
-            mock.patch.object(benchmark, "run", side_effect=fake_run) as run_mock,
-        ):
-            result = benchmark.run_judge_codex(prompt, cwd=Path("/tmp"), judge_model="gpt-5")
+        with tempfile.TemporaryDirectory() as codex_home:
+            codex_home_path = Path(codex_home)
+            (codex_home_path / "auth.json").write_text("{}")
+            (codex_home_path / "config.toml").write_text('model = "gpt-5"\n')
+            with (
+                mock.patch.object(benchmark, "require_command"),
+                mock.patch.object(benchmark, "run", side_effect=fake_run) as run_mock,
+                mock.patch.object(benchmark, "codex_home_source_dir", return_value=codex_home_path),
+            ):
+                result = benchmark.run_judge_codex(prompt, cwd=Path("/tmp"), judge_model="gpt-5")
 
         self.assertEqual(result, self.example_judgment())
         self.assertEqual(run_mock.call_args.args[0][-3:], ["--model", "gpt-5", "-"])
         self.assertNotIn(prompt, run_mock.call_args.args[0])
         self.assertEqual(run_mock.call_args.kwargs["input_text"], prompt)
+
+    def test_configure_condition_environment_blocks_tracegrep_in_control(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            with mock.patch.object(benchmark, "write_worktree_excludes"):
+                benchmark.configure_condition_environment(worktree, "control")
+
+            tg_script = benchmark.local_tg_path(worktree)
+            tracegrep_script = benchmark.local_tracegrep_path(worktree)
+
+            self.assertTrue(tg_script.exists())
+            self.assertTrue(tracegrep_script.exists())
+            self.assertIn("disabled in the control condition", tg_script.read_text())
+            self.assertFalse((worktree / ".codex" / "skills" / "tracegrep").exists())
 
     def test_cmd_run_task_refreshes_matrix_after_report(self) -> None:
         tasks = {"demo-task": self.task}
