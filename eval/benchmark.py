@@ -309,6 +309,14 @@ def evaluation_report_path(root: Path, task_id: str, agent: str, eval_id: str) -
     return reports_dir(root) / task_id / agent / f"{eval_id}.md"
 
 
+def session_log_path(root: Path, task_id: str, agent: str, eval_id: str, condition: str) -> Path:
+    return run_dir(root, task_id) / "session_logs" / agent / eval_id / f"{condition}.jsonl"
+
+
+def report_session_log_path(root: Path, task_id: str, agent: str, eval_id: str, condition: str) -> Path:
+    return reports_dir(root) / task_id / agent / f"{eval_id}.{condition}.agent.jsonl"
+
+
 def discovery_dir(root: Path, agent: str, run_id: str) -> Path:
     return root / "discovery" / f"{run_id}-{agent}"
 
@@ -659,9 +667,12 @@ def build_launcher_script(task: dict[str, Any], root: Path, agent: str, conditio
     tg_path = local_tg_path(worktree)
     cache_root = local_cache_root(worktree)
     if agent == "codex":
-        command = 'exec codex exec --full-auto --skip-git-repo-check "$@" - < "$PROMPT_FILE"'
+        command = 'exec codex exec --full-auto --skip-git-repo-check --json "$@" - < "$PROMPT_FILE"'
     elif agent == "claude":
-        command = 'exec claude -p --permission-mode bypassPermissions --tools default "$@" "$(cat "$PROMPT_FILE")"'
+        command = (
+            'exec claude -p --output-format stream-json --permission-mode bypassPermissions '
+            '--tools default "$@" "$(cat "$PROMPT_FILE")"'
+        )
     else:
         raise ValueError(f"unsupported agent: {agent}")
     preflight_lines: list[str] = []
@@ -1200,6 +1211,7 @@ def cmd_launch(
     prepare: bool,
     force: bool,
     extra_args: list[str],
+    session_log_file: Path | None = None,
 ) -> int:
     task = tasks[task_id]
     if prepare:
@@ -1211,8 +1223,31 @@ def cmd_launch(
         )
     command = [str(script), *extra_args]
     print("launching:", " ".join(shlex.quote(part) for part in command))
-    completed = subprocess.run(command)
-    return completed.returncode
+    if session_log_file is None:
+        completed = subprocess.run(command)
+        return completed.returncode
+
+    session_log_file.parent.mkdir(parents=True, exist_ok=True)
+    with session_log_file.open("w") as log_file:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        try:
+            while True:
+                chunk = process.stdout.read(4096)
+                if not chunk:
+                    break
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+                log_file.write(chunk)
+                log_file.flush()
+            return process.wait()
+        finally:
+            process.stdout.close()
 
 
 def default_judge_agent() -> str:
@@ -2450,6 +2485,28 @@ def markdown_link(label: str, url: str | None) -> str:
     return f"[{label}]({url})"
 
 
+def copy_report_session_logs(
+    *,
+    root: Path,
+    task_id: str,
+    evaluated_agent: str,
+    eval_id: str,
+    report_path: Path,
+) -> dict[str, str | None]:
+    links: dict[str, str | None] = {}
+    for condition in SUPPORTED_CONDITIONS:
+        source = session_log_path(root, task_id, evaluated_agent, eval_id, condition)
+        target = report_session_log_path(root, task_id, evaluated_agent, eval_id, condition)
+        if source.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            links[condition] = str(target.relative_to(report_path.parent))
+            continue
+        target.unlink(missing_ok=True)
+        links[condition] = None
+    return links
+
+
 def format_bullets(items: list[str]) -> str:
     if not items:
         return "- None noted"
@@ -2534,6 +2591,7 @@ def build_report_markdown(
     blind_manifest: dict[str, Any],
     publish_meta: dict[str, Any] | None,
     report_path: Path | None = None,
+    session_log_links: dict[str, str | None] | None = None,
 ) -> str:
     if judgments is None:
         if judge_agent is None or judgment is None:
@@ -2565,6 +2623,7 @@ def build_report_markdown(
         ]
 
     report_rel = str(report_path) if report_path else "n/a"
+    session_log_links = session_log_links or {}
     mapping_rows = "\n".join(
         [
             "| Label | Condition |",
@@ -2617,6 +2676,10 @@ def build_report_markdown(
         "",
         "## Published GitHub Links",
         "\n".join(link_section),
+        "",
+        "## Agent Event Logs",
+        f"- Control: {markdown_link('jsonl', session_log_links.get('control'))}",
+        f"- TG: {markdown_link('jsonl', session_log_links.get('tg'))}",
         "",
     ]
     for agent in judge_agents:
@@ -2720,6 +2783,13 @@ def render_report_for_eval(
     if publish_path.exists():
         publish_meta = normalize_publish_metadata(load_json(publish_path))
     report_path = evaluation_report_path(root, task["id"], evaluated_agent, eval_dir.name)
+    session_log_links = copy_report_session_logs(
+        root=root,
+        task_id=task["id"],
+        evaluated_agent=evaluated_agent,
+        eval_id=eval_dir.name,
+        report_path=report_path,
+    )
     report = build_report_markdown(
         task=task,
         evaluated_agent=evaluated_agent,
@@ -2728,6 +2798,7 @@ def render_report_for_eval(
         blind_manifest=blind_manifest,
         publish_meta=publish_meta,
         report_path=report_path,
+        session_log_links=session_log_links,
     )
     write_text(report_path, report)
     return report_path
@@ -3071,6 +3142,7 @@ def cmd_run_task(
             prepare=False,
             force=False,
             extra_args=build_args,
+            session_log_file=session_log_path(root, task_id, evaluated_agent, eval_id, condition),
         )
         if result != 0:
             print(f"stopping after {condition} launch failed with exit code {result}")

@@ -97,7 +97,7 @@ uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent codex
 uv run eval/benchmark.py run-task storybook-hide-toolbar-docs --agent claude --agent-model sonnet --judge-agent codex --judge-model gpt-5
 ```
 
-`run-task` is the default high-level workflow. It prepares both worktrees, runs both conditions, judges the result with both Claude and Codex by default, optionally publishes branches, writes the markdown report, and refreshes the aggregate `eval/reports/matrix.md` for that agent.
+`run-task` is the default high-level workflow. It prepares both worktrees, runs both conditions, captures each agent's structured JSONL event stream, judges the result with both Claude and Codex by default, optionally publishes branches, writes the markdown report, and refreshes the aggregate `eval/reports/matrix.md` for that agent.
 The generated build launches are headless and exit on completion; they do not open an interactive Codex or Claude session window.
 
 ### Inspect current state
@@ -218,6 +218,8 @@ Preparing a task creates:
 
 Judging a task creates:
 
+- `eval/workspaces/runs/<task>/session_logs/<agent>/<eval-id>/control.jsonl`
+- `eval/workspaces/runs/<task>/session_logs/<agent>/<eval-id>/tg.jsonl`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/control.diff`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/tg.diff`
 - `eval/workspaces/runs/<task>/evaluations/<agent>/<eval-id>/ground_truth.diff`
@@ -242,6 +244,8 @@ The default `runs` view shows one row per `evaluations/<agent>/<eval-id>/` direc
 Rendering reports writes repo-tracked markdown artifacts:
 
 - `eval/reports/<task>/<agent>/<eval-id>.md`
+- `eval/reports/<task>/<agent>/<eval-id>.control.agent.jsonl`
+- `eval/reports/<task>/<agent>/<eval-id>.tg.agent.jsonl`
 
 Aggregate reporting writes:
 
@@ -262,4 +266,5 @@ For the `tg` worktree only, `prepare` also creates:
 - The default judge agent from `TRACEGREP_EVAL_JUDGE_AGENT` still applies to the lower-level `judge` and `judge-all` commands. `run-task` now defaults to both Claude and Codex judges.
 - `publish` uses `gh` to detect or create forks under `btucker`, then pushes both branches with opaque benchmark branch names.
 - Public publishing can leak benchmark solutions into future search. Treat published branches as post-hoc artifacts, not inputs to new runs.
-- The markdown reports are meant to be committed back into this repo; the disposable run artifacts stay under `eval/workspaces/`.
+- The markdown reports and promoted session-log companions are meant to be committed back into this repo; the disposable run artifacts stay under `eval/workspaces/`.
+- Agent log format is agent-native JSONL: Codex launchers use `codex exec --json`, while Claude launchers use `claude -p --output-format stream-json`.
