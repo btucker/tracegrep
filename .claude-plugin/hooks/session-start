@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SKILL_PATH="${PLUGIN_ROOT}/skills/search-with-call-graph-context/SKILL.md"
+SKILL_PATH="$(cd "${PLUGIN_ROOT}/.." && pwd)/skills/tracegrep/SKILL.md"
 SKILL_CONTENT="$(cat "${SKILL_PATH}")"
 
 escape_for_json() {

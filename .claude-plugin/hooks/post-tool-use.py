@@ -62,11 +62,11 @@ def build_tracegrep_command(payload: dict) -> list[str] | None:
     if tool_input.get("-n") is False:
         command.append("--no-line-number")
 
+    command.append(pattern)
+
     path_value = tool_input.get("path")
     if isinstance(path_value, str) and path_value not in ("", "."):
         command.append(path_value)
-
-    command.append(pattern)
     return command
 
 
