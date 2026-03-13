@@ -154,6 +154,21 @@ class BenchmarkHarnessTests(unittest.TestCase):
             ],
         }
 
+    def example_review_feedback(self) -> dict:
+        return {
+            "summary": "One correctness issue worth fixing.",
+            "findings": [
+                {
+                    "title": "Guard missing null case",
+                    "details": "The new path can access a missing value before checking it.",
+                    "severity": "important",
+                    "suggested_fix": "Add the null check before dereferencing the value.",
+                    "file": "src/example.ts",
+                    "line": 12,
+                }
+            ],
+        }
+
     def test_blind_manifest_is_deterministic(self) -> None:
         first = benchmark.build_blind_manifest(
             task_id="demo-task",
@@ -191,19 +206,28 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertIn("Do not run `git fetch`, `git pull`, `git checkout`", prompt)
 
     def test_build_launcher_script_uses_headless_codex_exec(self) -> None:
-        script = benchmark.build_launcher_script(self.task, Path("/tmp/root"), "codex", "control")
+        with tempfile.TemporaryDirectory() as codex_home:
+            codex_home_path = Path(codex_home)
+            (codex_home_path / "auth.json").write_text("{}")
+            (codex_home_path / "config.toml").write_text('model = "gpt-5"\n')
+            with mock.patch.dict("os.environ", {"CODEX_HOME": str(codex_home_path)}, clear=False):
+                script = benchmark.build_launcher_script(self.task, Path("/tmp/root"), "codex", "control")
 
-        self.assertIn('exec codex exec --full-auto --skip-git-repo-check "$@" - < "$PROMPT_FILE"', script)
+        self.assertIn('exec codex exec --full-auto --skip-git-repo-check --json "$@" - < "$PROMPT_FILE"', script)
         self.assertNotIn('exec codex --full-auto "$@" "$(cat "$PROMPT_FILE")"', script)
+        self.assertIn('export CODEX_HOME="$CODEX_HOME_TMP"', script)
+        self.assertIn(f'cp {codex_home_path / "auth.json"} "$CODEX_HOME/auth.json"', script)
+        self.assertIn('export PATH="/tmp/root/runs/demo-task/worktrees/control/.eval-bin:$PATH"', script)
 
     def test_build_launcher_script_uses_headless_claude_print_mode(self) -> None:
         script = benchmark.build_launcher_script(self.task, Path("/tmp/root"), "claude", "control")
 
         self.assertIn(
-            'exec claude -p --permission-mode bypassPermissions --tools default "$@" "$(cat "$PROMPT_FILE")"',
+            'exec claude -p --output-format stream-json --permission-mode bypassPermissions --tools default "$@" "$(cat "$PROMPT_FILE")"',
             script,
         )
         self.assertNotIn('exec claude "$@" "$(cat "$PROMPT_FILE")"', script)
+        self.assertIn('export PATH="/tmp/root/runs/demo-task/worktrees/control/.eval-bin:$PATH"', script)
 
     def test_build_discovery_shortlist_preserves_candidate_metadata(self) -> None:
         shortlist = benchmark.build_discovery_shortlist(
@@ -369,6 +393,25 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertIn("[control branch](https://github.com/btucker/project/tree/branch-control)", report)
         self.assertIn("[compare](https://github.com/btucker/project/compare/control...tg)", report)
 
+    def test_report_markdown_links_session_logs(self) -> None:
+        report = benchmark.build_report_markdown(
+            task=self.task,
+            evaluated_agent="codex",
+            judge_agent="claude",
+            eval_id="20260310T000000Z",
+            judgment=self.example_judgment(),
+            blind_manifest=self.example_blind_manifest(),
+            publish_meta=None,
+            session_log_links={
+                "control": "20260310T000000Z.control.agent.jsonl",
+                "tg": "20260310T000000Z.tg.agent.jsonl",
+            },
+        )
+
+        self.assertIn("## Agent Event Logs", report)
+        self.assertIn("[jsonl](20260310T000000Z.control.agent.jsonl)", report)
+        self.assertIn("[jsonl](20260310T000000Z.tg.agent.jsonl)", report)
+
     def test_render_report_and_matrix_from_fake_eval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspaces"
@@ -378,6 +421,14 @@ class BenchmarkHarnessTests(unittest.TestCase):
             benchmark.write_judgment(eval_dir, self.example_judgment() | {"judge_agent": "codex"})
             benchmark.write_json(eval_dir / "blind_manifest.json", self.example_blind_manifest())
             benchmark.write_json(eval_dir / "publish.json", {"published": False})
+            benchmark.write_text(
+                benchmark.session_log_path(root, "demo-task", "codex", "20260310T000000Z", "control"),
+                "control output\n",
+            )
+            benchmark.write_text(
+                benchmark.session_log_path(root, "demo-task", "codex", "20260310T000000Z", "tg"),
+                "tg output\n",
+            )
             report_path = benchmark.render_report_for_eval(
                 task=self.task,
                 evaluated_agent="codex",
@@ -389,6 +440,15 @@ class BenchmarkHarnessTests(unittest.TestCase):
             self.assertIn("## Judge Summary", report)
             self.assertIn("## Judge Result: claude", report)
             self.assertIn("## Judge Result: codex", report)
+            self.assertIn("[jsonl](20260310T000000Z.control.agent.jsonl)", report)
+            self.assertEqual(
+                benchmark.report_session_log_path(root, "demo-task", "codex", "20260310T000000Z", "control").read_text(),
+                "control output\n",
+            )
+            self.assertEqual(
+                benchmark.report_session_log_path(root, "demo-task", "codex", "20260310T000000Z", "tg").read_text(),
+                "tg output\n",
+            )
             tasks = {"demo-task": self.task}
             exit_code = benchmark.cmd_report_all(tasks, ["demo-task"], root, evaluated_agent="codex")
             self.assertEqual(exit_code, 0)
@@ -806,6 +866,37 @@ class BenchmarkHarnessTests(unittest.TestCase):
         self.assertNotEqual(refreshed_prompt, "stale prompt")
         self.assertEqual(judge_mock.call_args.kwargs["cwd"], eval_dir)
 
+    def test_cmd_launch_captures_session_log(self) -> None:
+        tasks = {"demo-task": self.task}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = benchmark.launch_script_path(root, "demo-task", "codex", "control")
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("#!/usr/bin/env bash\nprintf 'line 1\\nline 2\\n'\n")
+            script.chmod(0o755)
+            log_path = root / "captured.jsonl"
+            stdout = io.StringIO()
+
+            with mock.patch("sys.stdout", stdout):
+                exit_code = benchmark.cmd_launch(
+                    tasks,
+                    "demo-task",
+                    root,
+                    agent="codex",
+                    condition="control",
+                    prepare=False,
+                    force=False,
+                    extra_args=[],
+                    session_log_file=log_path,
+                )
+            log_text = log_path.read_text()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(log_text, "line 1\nline 2\n")
+        self.assertIn("launching:", stdout.getvalue())
+        self.assertIn("line 1", stdout.getvalue())
+        self.assertIn("line 2", stdout.getvalue())
+
     def test_cmd_runs_prints_rich_table_when_available(self) -> None:
         tasks = {"demo-task": self.task}
 
@@ -897,48 +988,89 @@ class BenchmarkHarnessTests(unittest.TestCase):
         def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             output_path = Path(args[args.index("-o") + 1])
             output_path.write_text(json.dumps(self.example_judgment()))
+            env = kwargs.get("env")
+            assert isinstance(env, dict)
+            codex_home = Path(env["CODEX_HOME"])
+            assert codex_home.exists()
+            assert (codex_home / "auth.json").exists()
+            assert (codex_home / "config.toml").exists()
             return subprocess.CompletedProcess(args, 0, stdout="")
 
-        with (
-            mock.patch.object(benchmark, "require_command"),
-            mock.patch.object(benchmark, "run", side_effect=fake_run) as run_mock,
-        ):
-            result = benchmark.run_judge_codex(prompt, cwd=Path("/tmp"), judge_model="gpt-5")
+        with tempfile.TemporaryDirectory() as codex_home:
+            codex_home_path = Path(codex_home)
+            (codex_home_path / "auth.json").write_text("{}")
+            (codex_home_path / "config.toml").write_text('model = "gpt-5"\n')
+            with (
+                mock.patch.object(benchmark, "require_command"),
+                mock.patch.object(benchmark, "run", side_effect=fake_run) as run_mock,
+                mock.patch.object(benchmark, "codex_home_source_dir", return_value=codex_home_path),
+            ):
+                result = benchmark.run_judge_codex(prompt, cwd=Path("/tmp"), judge_model="gpt-5")
 
         self.assertEqual(result, self.example_judgment())
         self.assertEqual(run_mock.call_args.args[0][-3:], ["--model", "gpt-5", "-"])
         self.assertNotIn(prompt, run_mock.call_args.args[0])
         self.assertEqual(run_mock.call_args.kwargs["input_text"], prompt)
 
+    def test_configure_condition_environment_blocks_tracegrep_in_control(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            with mock.patch.object(benchmark, "write_worktree_excludes"):
+                benchmark.configure_condition_environment(worktree, "control")
+
+            tg_script = benchmark.local_tg_path(worktree)
+            tracegrep_script = benchmark.local_tracegrep_path(worktree)
+
+            self.assertTrue(tg_script.exists())
+            self.assertTrue(tracegrep_script.exists())
+            self.assertIn("disabled in the control condition", tg_script.read_text())
+            self.assertFalse((worktree / ".codex" / "skills" / "tracegrep").exists())
+
     def test_cmd_run_task_refreshes_matrix_after_report(self) -> None:
         tasks = {"demo-task": self.task}
-        with (
-            mock.patch.object(benchmark, "new_eval_id", return_value="20260310T150000Z"),
-            mock.patch.object(benchmark, "prepare_task") as prepare_mock,
-            mock.patch.object(benchmark, "cmd_launch", return_value=0) as launch_mock,
-            mock.patch.object(benchmark, "cmd_judge", return_value=0) as judge_mock,
-            mock.patch.object(benchmark, "cmd_publish", return_value=0) as publish_mock,
-            mock.patch.object(benchmark, "cmd_report", return_value=0) as report_mock,
-            mock.patch.object(benchmark, "cmd_report_all", return_value=0) as report_all_mock,
-        ):
-            result = benchmark.cmd_run_task(
-                tasks,
-                "demo-task",
-                Path("/tmp/root"),
-                evaluated_agent="codex",
-                agent_model="gpt-5",
-                judge_agents=["claude", "codex"],
-                judge_model=None,
-                force=False,
-                extra_args=["--effort", "high"],
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            with (
+                mock.patch.object(benchmark, "new_eval_id", return_value="20260310T150000Z"),
+                mock.patch.object(benchmark, "prepare_task") as prepare_mock,
+                mock.patch.object(benchmark, "cmd_launch", return_value=0) as launch_mock,
+                mock.patch.object(benchmark, "snapshot_worktree_commit", side_effect=["snap-control", "snap-tg"]) as snapshot_mock,
+                mock.patch.object(benchmark, "initialize_eval_run") as init_mock,
+                mock.patch.object(benchmark, "cmd_judge", return_value=0) as judge_mock,
+                mock.patch.object(benchmark, "cmd_publish", return_value=0) as publish_mock,
+                mock.patch.object(benchmark, "cmd_report", return_value=0) as report_mock,
+                mock.patch.object(benchmark, "cmd_report_all", return_value=0) as report_all_mock,
+            ):
+                result = benchmark.cmd_run_task(
+                    tasks,
+                    "demo-task",
+                    root,
+                    evaluated_agent="codex",
+                    agent_model="gpt-5",
+                    judge_agents=["claude", "codex"],
+                    judge_model=None,
+                    review_pass=False,
+                    review_model=None,
+                    force=False,
+                    extra_args=["--effort", "high"],
+                )
 
         self.assertEqual(result, 0)
-        prepare_mock.assert_called_once_with(Path("/tmp/root"), self.task, force=False)
+        prepare_mock.assert_called_once_with(root, self.task, force=False)
         self.assertEqual(launch_mock.call_count, 2)
         self.assertEqual(launch_mock.call_args_list[0].kwargs["condition"], "control")
         self.assertEqual(launch_mock.call_args_list[1].kwargs["condition"], "tg")
         self.assertEqual(launch_mock.call_args_list[0].kwargs["extra_args"], ["--model", "gpt-5", "--effort", "high"])
+        self.assertEqual(
+            launch_mock.call_args_list[0].kwargs["session_log_file"],
+            benchmark.session_log_path(root, "demo-task", "codex", "20260310T150000Z", "control"),
+        )
+        self.assertEqual(
+            launch_mock.call_args_list[1].kwargs["session_log_file"],
+            benchmark.session_log_path(root, "demo-task", "codex", "20260310T150000Z", "tg"),
+        )
+        self.assertEqual(snapshot_mock.call_count, 2)
+        init_mock.assert_called_once()
         self.assertEqual(judge_mock.call_count, 2)
         self.assertEqual(judge_mock.call_args_list[0].kwargs["judge_agent"], "claude")
         self.assertEqual(judge_mock.call_args_list[1].kwargs["judge_agent"], "codex")
@@ -946,15 +1078,83 @@ class BenchmarkHarnessTests(unittest.TestCase):
         report_mock.assert_called_once_with(
             tasks,
             "demo-task",
-            Path("/tmp/root"),
+            root,
             evaluated_agent="codex",
             eval_id="20260310T150000Z",
         )
         report_all_mock.assert_called_once_with(
             tasks,
             [],
-            Path("/tmp/root"),
+            root,
             evaluated_agent="codex",
+        )
+
+    def test_cmd_run_task_with_review_pass_creates_review_variants(self) -> None:
+        tasks = {"demo-task": self.task}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            with (
+                mock.patch.object(benchmark, "new_eval_id", return_value="20260310T150000Z"),
+                mock.patch.object(benchmark, "prepare_task"),
+                mock.patch.object(benchmark, "cmd_launch", return_value=0) as launch_mock,
+                mock.patch.object(
+                    benchmark,
+                    "snapshot_worktree_commit",
+                    side_effect=["snap-control", "snap-control-review", "snap-tg", "snap-tg-review"],
+                ),
+                mock.patch.object(
+                    benchmark,
+                    "run_review_claude",
+                    return_value=self.example_review_feedback(),
+                ) as review_mock,
+                mock.patch.object(benchmark, "initialize_eval_run") as init_mock,
+                mock.patch.object(benchmark, "cmd_judge", return_value=0),
+                mock.patch.object(benchmark, "cmd_publish", return_value=0),
+                mock.patch.object(benchmark, "cmd_report", return_value=0),
+                mock.patch.object(benchmark, "cmd_report_all", return_value=0),
+            ):
+                result = benchmark.cmd_run_task(
+                    tasks,
+                    "demo-task",
+                    root,
+                    evaluated_agent="codex",
+                    agent_model=None,
+                    judge_agents=["claude"],
+                    judge_model=None,
+                    review_pass=True,
+                    review_model="sonnet",
+                    force=False,
+                    extra_args=[],
+                )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(review_mock.call_count, 2)
+        self.assertEqual(launch_mock.call_count, 4)
+        self.assertEqual(
+            launch_mock.call_args_list[1].kwargs["session_log_file"],
+            benchmark.session_log_path(root, "demo-task", "codex", "20260310T150000Z", "control_review"),
+        )
+        self.assertEqual(
+            launch_mock.call_args_list[3].kwargs["session_log_file"],
+            benchmark.session_log_path(root, "demo-task", "codex", "20260310T150000Z", "tg_review"),
+        )
+        self.assertEqual(
+            launch_mock.call_args_list[1].kwargs["prompt_override"],
+            benchmark.review_prompt_path(root, "demo-task", "control"),
+        )
+        self.assertEqual(
+            launch_mock.call_args_list[3].kwargs["prompt_override"],
+            benchmark.review_prompt_path(root, "demo-task", "tg"),
+        )
+        init_mock.assert_called_once()
+        self.assertEqual(
+            init_mock.call_args.kwargs["snapshot_commits"],
+            {
+                "control": "snap-control",
+                "control_review": "snap-control-review",
+                "tg": "snap-tg",
+                "tg_review": "snap-tg-review",
+            },
         )
 
 
@@ -989,6 +1189,7 @@ class BenchmarkCliSmokeTests(unittest.TestCase):
         self.assertIn("run-task", result.stdout)
         self.assertIn("--agent-model", result.stdout)
         self.assertIn("--judge-model", result.stdout)
+        self.assertIn("--review-pass", result.stdout)
 
     def test_runs_help(self) -> None:
         result = self.run_help("runs")
