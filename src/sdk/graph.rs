@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::graph_cache::{load_or_build_query_cache, LoadQueryResult};
@@ -147,5 +148,36 @@ impl Graph {
     /// Whether this function is in test code.
     pub fn function_is_test(&self, node: NodeId) -> bool {
         self.payload().graph.nodes[node.0].is_test
+    }
+
+    /// Files that changed since the last index build.
+    /// Empty if the cache was fully reused.
+    pub fn changed_files(&self) -> &[String] {
+        &self.loaded.outcome.changed_files
+    }
+
+    /// Functions defined in files that changed since the last index build.
+    /// This is the core loop for incremental analysis: only check changed functions.
+    pub fn changed_functions(&self) -> Vec<NodeId> {
+        let changed: HashSet<&str> = self
+            .loaded
+            .outcome
+            .changed_files
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+
+        if changed.is_empty() {
+            return Vec::new();
+        }
+
+        self.payload()
+            .graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| changed.contains(node.file.as_str()))
+            .map(|(idx, _)| NodeId(idx))
+            .collect()
     }
 }

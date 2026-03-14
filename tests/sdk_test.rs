@@ -178,7 +178,11 @@ fn caller_and_reference_support_hash_dedup() {
     let mut set = HashSet::new();
     set.insert(caller.clone());
     set.insert(caller);
-    assert_eq!(set.len(), 1, "identical Callers should deduplicate in HashSet");
+    assert_eq!(
+        set.len(),
+        1,
+        "identical Callers should deduplicate in HashSet"
+    );
 
     let reference = Reference {
         file: "src/lib.rs".into(),
@@ -191,7 +195,72 @@ fn caller_and_reference_support_hash_dedup() {
     let mut set = HashSet::new();
     set.insert(reference.clone());
     set.insert(reference);
-    assert_eq!(set.len(), 1, "identical References should deduplicate in HashSet");
+    assert_eq!(
+        set.len(),
+        1,
+        "identical References should deduplicate in HashSet"
+    );
+}
+
+#[test]
+fn graph_changed_files_detects_modifications() {
+    let (_dir, repo_path) = init_test_repo(&[("src/main.rs", "fn main() {}\nfn hello() {}\n")]);
+    // Build index first time (primes the cache)
+    let _ = Graph::load(&repo_path).unwrap();
+
+    // Modify a file (without committing — simulates pre-commit state)
+    std::fs::write(
+        repo_path.join("src/main.rs"),
+        "fn main() { hello(); }\nfn hello() {}\nfn added() {}\n",
+    )
+    .unwrap();
+
+    // Rebuild — should see changed file
+    let graph = Graph::load(&repo_path).unwrap();
+    let changed = graph.changed_files();
+    assert!(
+        changed.contains(&"src/main.rs".to_string()),
+        "changed_files: {changed:?}"
+    );
+}
+
+#[test]
+fn graph_changed_functions_returns_functions_in_changed_files() {
+    let (_dir, repo_path) = init_test_repo(&[
+        ("src/main.rs", "fn main() {}\n"),
+        ("src/lib.rs", "fn helper() {}\n"),
+    ]);
+    let _ = Graph::load(&repo_path).unwrap();
+
+    // Only modify lib.rs
+    std::fs::write(
+        repo_path.join("src/lib.rs"),
+        "fn helper() { println!(\"changed\"); }\n",
+    )
+    .unwrap();
+
+    let graph = Graph::load(&repo_path).unwrap();
+    let changed = graph.changed_functions();
+    let names: Vec<&str> = changed.iter().map(|n| graph.function_name(*n)).collect();
+    assert!(
+        names.contains(&"helper"),
+        "helper should be in changed, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"main"),
+        "main should NOT be in changed, got: {names:?}"
+    );
+}
+
+#[test]
+fn graph_changed_files_empty_on_cache_hit() {
+    let (_dir, repo_path) = init_test_repo(&[("src/main.rs", "fn main() {}\n")]);
+    // First build primes the cache
+    let _ = Graph::load(&repo_path).unwrap();
+    // Second build without modifications — full cache hit
+    let graph = Graph::load(&repo_path).unwrap();
+    assert!(graph.changed_files().is_empty(), "no files changed");
+    assert!(graph.changed_functions().is_empty(), "no functions changed");
 }
 
 #[test]
