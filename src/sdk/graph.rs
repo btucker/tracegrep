@@ -6,6 +6,7 @@ use crate::timing::TimingCollector;
 
 use super::builder::GraphBuilder;
 use super::error::Error;
+use super::types::NodeId;
 
 /// A loaded call graph with pre-built indexes for fast querying.
 pub struct Graph {
@@ -56,8 +57,84 @@ impl Graph {
         self.loaded.payload.graph.nodes.len()
     }
 
-    #[allow(dead_code)]
+    /// Access the underlying `CallGraph` data (escape hatch for advanced use).
+    #[doc(hidden)]
+    pub fn raw(&self) -> &crate::analysis::codepaths::CallGraph {
+        &self.loaded.payload.graph
+    }
+
     fn payload(&self) -> &QueryCachePayload {
         &self.loaded.payload
+    }
+
+    // --- Lookups ---
+
+    /// Find the function at a specific file path and line number.
+    pub fn function_at(&self, file: &str, line: usize) -> Option<NodeId> {
+        self.payload()
+            .function_index
+            .lookup(file, line)
+            .map(NodeId)
+    }
+
+    /// Find all functions matching a simple name (e.g., `"new"`).
+    pub fn functions_by_name(&self, name: &str) -> Vec<NodeId> {
+        self.payload()
+            .graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.name == name)
+            .map(|(idx, _)| NodeId(idx))
+            .collect()
+    }
+
+    /// Find all functions matching a qualified name (e.g., `"MyStruct::new"`).
+    pub fn functions_by_qualified_name(&self, qualified_name: &str) -> Vec<NodeId> {
+        self.payload()
+            .graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.qualified_name == qualified_name)
+            .map(|(idx, _)| NodeId(idx))
+            .collect()
+    }
+
+    /// All function nodes in the graph.
+    pub fn functions(&self) -> Vec<NodeId> {
+        (0..self.payload().graph.nodes.len()).map(NodeId).collect()
+    }
+
+    // --- Accessors ---
+
+    /// Simple function name.
+    pub fn function_name(&self, node: NodeId) -> &str {
+        &self.payload().graph.nodes[node.0].name
+    }
+
+    /// Fully qualified name (e.g., `MyStruct::new`).
+    pub fn function_qualified_name(&self, node: NodeId) -> &str {
+        &self.payload().graph.nodes[node.0].qualified_name
+    }
+
+    /// File path relative to repo root.
+    pub fn function_file(&self, node: NodeId) -> &str {
+        &self.payload().graph.nodes[node.0].file
+    }
+
+    /// Line number where the function is defined.
+    pub fn function_line(&self, node: NodeId) -> usize {
+        self.payload().graph.nodes[node.0].line
+    }
+
+    /// End line of the function definition.
+    pub fn function_end_line(&self, node: NodeId) -> usize {
+        self.payload().graph.nodes[node.0].end_line
+    }
+
+    /// Whether this function is in test code.
+    pub fn function_is_test(&self, node: NodeId) -> bool {
+        self.payload().graph.nodes[node.0].is_test
     }
 }

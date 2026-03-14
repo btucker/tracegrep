@@ -58,6 +58,49 @@ fn graph_builder_with_tests() {
     assert!(with.node_count() > without.node_count(),
         "with_tests={} should be > without={}",
         with.node_count(), without.node_count());
+    let test_nodes: Vec<_> = with.functions().into_iter()
+        .filter(|n| with.function_is_test(*n))
+        .collect();
+    assert!(!test_nodes.is_empty(), "should have at least one test function");
+}
+
+#[test]
+fn graph_function_at_finds_by_file_and_line() {
+    let (_dir, repo_path) = init_test_repo(&[
+        ("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n"),
+    ]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let node = graph.function_at("src/main.rs", 1);
+    assert!(node.is_some(), "should find main at line 1");
+    assert_eq!(graph.function_name(node.unwrap()), "main");
+}
+
+#[test]
+fn graph_functions_by_name_finds_matches() {
+    let (_dir, repo_path) = init_test_repo(&[
+        ("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n"),
+    ]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let nodes = graph.functions_by_name("hello");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(graph.function_name(nodes[0]), "hello");
+}
+
+#[test]
+fn graph_function_accessors() {
+    let (_dir, repo_path) = init_test_repo(&[
+        ("src/main.rs", "fn main() {\n    hello();\n}\nfn hello() {}\n"),
+    ]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let nodes = graph.functions_by_name("main");
+    let node = nodes[0];
+    assert_eq!(graph.function_name(node), "main");
+    assert_eq!(graph.function_file(node), "src/main.rs");
+    assert_eq!(graph.function_line(node), 1);
+    assert!(!graph.function_is_test(node));
 }
 
 #[test]
