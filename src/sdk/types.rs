@@ -11,6 +11,7 @@ pub struct Caller {
     pub file: String,
     pub function: String,
     pub qualified_name: String,
+    /// Line where the calling function is defined (not the call site).
     pub line: usize,
     pub is_test: bool,
     /// How many call levels away from the target (1 = direct caller).
@@ -24,6 +25,7 @@ pub struct Reference {
     pub file: String,
     pub function: String,
     pub qualified_name: String,
+    /// Line where the referencing function is defined (not the reference site).
     pub line: usize,
     pub is_test: bool,
     pub context: Option<String>,
