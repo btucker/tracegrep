@@ -163,6 +163,38 @@ fn caller_and_reference_have_expected_fields() {
 }
 
 #[test]
+fn caller_and_reference_support_hash_dedup() {
+    use std::collections::HashSet;
+
+    let caller = Caller {
+        file: "src/main.rs".into(),
+        function: "main".into(),
+        qualified_name: "main".into(),
+        line: 1,
+        is_test: false,
+        depth: 1,
+        conditions: vec![],
+    };
+    let mut set = HashSet::new();
+    set.insert(caller.clone());
+    set.insert(caller);
+    assert_eq!(set.len(), 1, "identical Callers should deduplicate in HashSet");
+
+    let reference = Reference {
+        file: "src/lib.rs".into(),
+        function: "init".into(),
+        qualified_name: "init".into(),
+        line: 10,
+        is_test: false,
+        context: None,
+    };
+    let mut set = HashSet::new();
+    set.insert(reference.clone());
+    set.insert(reference);
+    assert_eq!(set.len(), 1, "identical References should deduplicate in HashSet");
+}
+
+#[test]
 fn graph_load_rejects_subdirectory_path() {
     let (_dir, repo_path) = init_test_repo(&[("src/main.rs", "fn main() {}\n")]);
     let result = Graph::load(repo_path.join("src"));
