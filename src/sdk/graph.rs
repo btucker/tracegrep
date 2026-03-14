@@ -1,3 +1,4 @@
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::graph_cache::{load_or_build_query_cache, LoadQueryResult};
@@ -6,7 +7,7 @@ use crate::timing::TimingCollector;
 
 use super::builder::GraphBuilder;
 use super::error::Error;
-use super::types::NodeId;
+use super::types::{Caller, NodeId, Reference};
 
 /// A loaded call graph with pre-built indexes for fast querying.
 pub struct Graph {
@@ -147,5 +148,86 @@ impl Graph {
     /// Whether this function is in test code.
     pub fn function_is_test(&self, node: NodeId) -> bool {
         self.payload().graph.nodes[node.0].is_test
+    }
+
+    // --- Query methods ---
+
+    /// Return all callers of `node` up to `depth` levels away, using BFS.
+    ///
+    /// `depth = 1` returns only direct callers. `depth = 0` returns an empty
+    /// list. Cycles are detected and will not cause infinite traversal.
+    pub fn callers(&self, node: NodeId, depth: usize) -> Vec<Caller> {
+        let payload = self.payload();
+        let mut result: Vec<Caller> = Vec::new();
+        let mut visited: HashSet<usize> = HashSet::new();
+        // Queue entries: (node_index, current_depth)
+        let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+
+        visited.insert(node.0);
+        queue.push_back((node.0, 0));
+
+        while let Some((current_idx, current_depth)) = queue.pop_front() {
+            if current_depth >= depth {
+                continue;
+            }
+            let next_depth = current_depth + 1;
+            for &edge_idx in &payload.backward_calls[current_idx] {
+                let edge = &payload.graph.edges[edge_idx];
+                let caller_idx = edge.caller;
+                if visited.contains(&caller_idx) {
+                    continue;
+                }
+                visited.insert(caller_idx);
+                let caller_node = &payload.graph.nodes[caller_idx];
+                result.push(Caller {
+                    file: caller_node.file.clone(),
+                    function: caller_node.name.clone(),
+                    qualified_name: caller_node.qualified_name.clone(),
+                    line: caller_node.line,
+                    is_test: caller_node.is_test,
+                    depth: next_depth,
+                    conditions: edge.conditions.clone(),
+                });
+                queue.push_back((caller_idx, next_depth));
+            }
+        }
+
+        result
+    }
+
+    /// Return the direct callees of `node` (functions called by `node`).
+    ///
+    /// Each callee appears at most once, even if called from multiple sites.
+    pub fn callees(&self, node: NodeId) -> Vec<NodeId> {
+        let payload = self.payload();
+        let mut seen = HashSet::new();
+        payload
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| edge.caller == node.0)
+            .filter(|edge| seen.insert(edge.callee))
+            .map(|edge| NodeId(edge.callee))
+            .collect()
+    }
+
+    /// Return all reference sites where `node` is referenced (e.g., passed as an argument).
+    pub fn references(&self, node: NodeId) -> Vec<Reference> {
+        let payload = self.payload();
+        payload.backward_references[node.0]
+            .iter()
+            .map(|&ref_idx| {
+                let r = &payload.graph.references[ref_idx];
+                let referencer_node = &payload.graph.nodes[r.referencer];
+                Reference {
+                    file: referencer_node.file.clone(),
+                    function: referencer_node.name.clone(),
+                    qualified_name: referencer_node.qualified_name.clone(),
+                    line: referencer_node.line,
+                    is_test: referencer_node.is_test,
+                    context: r.context.clone(),
+                }
+            })
+            .collect()
     }
 }

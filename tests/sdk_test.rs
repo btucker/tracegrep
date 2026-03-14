@@ -203,3 +203,79 @@ fn graph_load_rejects_subdirectory_path() {
         "loading a subdirectory should fail, not silently produce a wrong graph"
     );
 }
+
+#[test]
+fn graph_callers_returns_direct_callers() {
+    let (_dir, repo_path) = init_test_repo(&[
+        ("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n"),
+    ]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let hello = graph.functions_by_name("hello");
+    assert_eq!(hello.len(), 1);
+
+    let callers = graph.callers(hello[0], 1);
+    assert_eq!(callers.len(), 1);
+    assert_eq!(callers[0].function, "main");
+    assert_eq!(callers[0].depth, 1);
+}
+
+#[test]
+fn graph_callers_respects_depth() {
+    let (_dir, repo_path) = init_test_repo(&[(
+        "src/main.rs",
+        "fn a() { b(); }\nfn b() { c(); }\nfn c() {}\n",
+    )]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let c = graph.functions_by_name("c");
+    assert_eq!(c.len(), 1);
+
+    let depth1 = graph.callers(c[0], 1);
+    assert_eq!(depth1.len(), 1, "depth 1 should find only b");
+    assert_eq!(depth1[0].function, "b");
+
+    let depth2 = graph.callers(c[0], 2);
+    assert_eq!(depth2.len(), 2, "depth 2 should find b and a");
+}
+
+#[test]
+fn graph_callees_returns_called_functions() {
+    let (_dir, repo_path) = init_test_repo(&[
+        ("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n"),
+    ]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let main_fn = graph.functions_by_name("main")[0];
+    let callees = graph.callees(main_fn);
+    let names: Vec<&str> = callees.iter().map(|n| graph.function_name(*n)).collect();
+    assert!(names.contains(&"hello"), "main should call hello, got: {names:?}");
+}
+
+#[test]
+fn graph_references_returns_reference_sites() {
+    let (_dir, repo_path) = init_test_repo(&[(
+        "src/main.rs",
+        "fn main() { register(hello); }\nfn hello() {}\nfn register(_f: fn()) {}\n",
+    )]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let hello = graph.functions_by_name("hello")[0];
+    let refs = graph.references(hello);
+    assert!(!refs.is_empty(), "hello should be referenced by main");
+}
+
+#[test]
+fn graph_callers_handles_cycles() {
+    let (_dir, repo_path) = init_test_repo(&[(
+        "src/main.rs",
+        "fn a() { b(); }\nfn b() { a(); }\n",
+    )]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let a = graph.functions_by_name("a")[0];
+    // Large depth should not loop forever; cycle detection stops traversal
+    let callers = graph.callers(a, 10);
+    assert_eq!(callers.len(), 1, "only b should appear (cycle broken), got: {callers:?}");
+    assert_eq!(callers[0].function, "b");
+}
