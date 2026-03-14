@@ -1,4 +1,4 @@
-use tracegrep::sdk::{Error, NodeId, Caller, Reference};
+use tracegrep::sdk::{Caller, Error, NodeId, Reference};
 
 #[test]
 fn error_is_send_sync_and_displays() {
