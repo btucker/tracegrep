@@ -6,7 +6,7 @@
 pub struct NodeId(pub(super) usize);
 
 /// A function that calls the queried function.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Caller {
     pub file: String,
     pub function: String,
@@ -19,7 +19,7 @@ pub struct Caller {
 }
 
 /// A function that references the queried function (e.g., passes it as an argument).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Reference {
     pub file: String,
     pub function: String,
