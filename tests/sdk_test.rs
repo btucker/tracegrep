@@ -20,7 +20,12 @@ fn init_test_repo(files: &[(&str, &str)]) -> (tempfile::TempDir, std::path::Path
             .env("GIT_COMMITTER_EMAIL", "test@test.com")
             .output()
             .unwrap();
-        assert!(output.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
         output
     };
     git(&["init"]);
@@ -34,9 +39,8 @@ fn init_test_repo(files: &[(&str, &str)]) -> (tempfile::TempDir, std::path::Path
 
 #[test]
 fn graph_load_opens_repo() {
-    let (_dir, repo_path) = init_test_repo(&[
-        ("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n"),
-    ]);
+    let (_dir, repo_path) =
+        init_test_repo(&[("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n")]);
     let graph = Graph::load(&repo_path).unwrap();
     assert!(graph.node_count() >= 2, "expected at least main and hello");
 }
@@ -55,22 +59,32 @@ fn graph_builder_with_tests() {
     ]);
 
     let without = Graph::load(&repo_path).unwrap();
-    let with = Graph::builder(&repo_path).include_tests(true).build().unwrap();
+    let with = Graph::builder(&repo_path)
+        .include_tests(true)
+        .build()
+        .unwrap();
 
-    assert!(with.node_count() > without.node_count(),
+    assert!(
+        with.node_count() > without.node_count(),
         "with_tests={} should be > without={}",
-        with.node_count(), without.node_count());
-    let test_nodes: Vec<_> = with.functions().into_iter()
+        with.node_count(),
+        without.node_count()
+    );
+    let test_nodes: Vec<_> = with
+        .functions()
+        .into_iter()
         .filter(|n| with.function_is_test(*n))
         .collect();
-    assert!(!test_nodes.is_empty(), "should have at least one test function");
+    assert!(
+        !test_nodes.is_empty(),
+        "should have at least one test function"
+    );
 }
 
 #[test]
 fn graph_function_at_finds_by_file_and_line() {
-    let (_dir, repo_path) = init_test_repo(&[
-        ("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n"),
-    ]);
+    let (_dir, repo_path) =
+        init_test_repo(&[("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n")]);
     let graph = Graph::load(&repo_path).unwrap();
 
     let node = graph.function_at("src/main.rs", 1);
@@ -80,9 +94,8 @@ fn graph_function_at_finds_by_file_and_line() {
 
 #[test]
 fn graph_functions_by_name_finds_matches() {
-    let (_dir, repo_path) = init_test_repo(&[
-        ("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n"),
-    ]);
+    let (_dir, repo_path) =
+        init_test_repo(&[("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n")]);
     let graph = Graph::load(&repo_path).unwrap();
 
     let nodes = graph.functions_by_name("hello");
@@ -92,9 +105,10 @@ fn graph_functions_by_name_finds_matches() {
 
 #[test]
 fn graph_function_accessors() {
-    let (_dir, repo_path) = init_test_repo(&[
-        ("src/main.rs", "fn main() {\n    hello();\n}\nfn hello() {}\n"),
-    ]);
+    let (_dir, repo_path) = init_test_repo(&[(
+        "src/main.rs",
+        "fn main() {\n    hello();\n}\nfn hello() {}\n",
+    )]);
     let graph = Graph::load(&repo_path).unwrap();
 
     let nodes = graph.functions_by_name("main");
@@ -150,9 +164,10 @@ fn caller_and_reference_have_expected_fields() {
 
 #[test]
 fn graph_load_rejects_subdirectory_path() {
-    let (_dir, repo_path) = init_test_repo(&[
-        ("src/main.rs", "fn main() {}\n"),
-    ]);
+    let (_dir, repo_path) = init_test_repo(&[("src/main.rs", "fn main() {}\n")]);
     let result = Graph::load(repo_path.join("src"));
-    assert!(result.is_err(), "loading a subdirectory should fail, not silently produce a wrong graph");
+    assert!(
+        result.is_err(),
+        "loading a subdirectory should fail, not silently produce a wrong graph"
+    );
 }

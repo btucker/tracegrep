@@ -43,9 +43,7 @@ impl Graph {
                 .output();
             match git_check {
                 Ok(output) if output.status.success() => {
-                    let toplevel = PathBuf::from(
-                        String::from_utf8_lossy(&output.stdout).trim(),
-                    );
+                    let toplevel = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
                     if toplevel.canonicalize().ok().as_ref() != Some(&repo_path) {
                         return Err(Error::NotGitRepo { path: repo_path });
                     }
@@ -80,10 +78,7 @@ impl Graph {
 
     /// Find the function at a specific file path and line number.
     pub fn function_at(&self, file: &str, line: usize) -> Option<NodeId> {
-        self.payload()
-            .function_index
-            .lookup(file, line)
-            .map(NodeId)
+        self.payload().function_index.lookup(file, line).map(NodeId)
     }
 
     /// Find all functions matching a simple name (e.g., `"new"`).
