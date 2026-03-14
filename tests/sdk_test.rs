@@ -206,9 +206,8 @@ fn graph_load_rejects_subdirectory_path() {
 
 #[test]
 fn graph_callers_returns_direct_callers() {
-    let (_dir, repo_path) = init_test_repo(&[
-        ("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n"),
-    ]);
+    let (_dir, repo_path) =
+        init_test_repo(&[("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n")]);
     let graph = Graph::load(&repo_path).unwrap();
 
     let hello = graph.functions_by_name("hello");
@@ -241,15 +240,17 @@ fn graph_callers_respects_depth() {
 
 #[test]
 fn graph_callees_returns_called_functions() {
-    let (_dir, repo_path) = init_test_repo(&[
-        ("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n"),
-    ]);
+    let (_dir, repo_path) =
+        init_test_repo(&[("src/main.rs", "fn main() { hello(); }\nfn hello() {}\n")]);
     let graph = Graph::load(&repo_path).unwrap();
 
     let main_fn = graph.functions_by_name("main")[0];
     let callees = graph.callees(main_fn);
     let names: Vec<&str> = callees.iter().map(|n| graph.function_name(*n)).collect();
-    assert!(names.contains(&"hello"), "main should call hello, got: {names:?}");
+    assert!(
+        names.contains(&"hello"),
+        "main should call hello, got: {names:?}"
+    );
 }
 
 #[test]
@@ -287,22 +288,116 @@ fn graph_unreachable_functions_finds_dead_code() {
     let graph = Graph::load(&repo_path).unwrap();
 
     let unreachable = graph.unreachable_functions();
-    let names: Vec<&str> = unreachable.iter().map(|n| graph.function_name(*n)).collect();
-    assert!(names.contains(&"dead"), "dead should be unreachable, got: {names:?}");
-    assert!(!names.contains(&"used"), "used should not be unreachable, got: {names:?}");
+    let names: Vec<&str> = unreachable
+        .iter()
+        .map(|n| graph.function_name(*n))
+        .collect();
+    assert!(
+        names.contains(&"dead"),
+        "dead should be unreachable, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"used"),
+        "used should not be unreachable, got: {names:?}"
+    );
 }
 
 #[test]
 fn graph_callers_handles_cycles() {
-    let (_dir, repo_path) = init_test_repo(&[(
-        "src/main.rs",
-        "fn a() { b(); }\nfn b() { a(); }\n",
-    )]);
+    let (_dir, repo_path) =
+        init_test_repo(&[("src/main.rs", "fn a() { b(); }\nfn b() { a(); }\n")]);
     let graph = Graph::load(&repo_path).unwrap();
 
     let a = graph.functions_by_name("a")[0];
     // Large depth should not loop forever; cycle detection stops traversal
     let callers = graph.callers(a, 10);
-    assert_eq!(callers.len(), 1, "only b should appear (cycle broken), got: {callers:?}");
+    assert_eq!(
+        callers.len(),
+        1,
+        "only b should appear (cycle broken), got: {callers:?}"
+    );
     assert_eq!(callers[0].function, "b");
+}
+
+#[test]
+fn graph_callers_merges_conditions_from_multiple_edges() {
+    // Issue #1: callers() should merge conditions when a caller has
+    // multiple edges to the target (e.g., calls from different if-branches).
+    let (_dir, repo_path) = init_test_repo(&[(
+        "src/main.rs",
+        concat!(
+            "fn dispatch(flag: bool) {\n",
+            "    if flag {\n",
+            "        target();\n",
+            "    } else {\n",
+            "        target();\n",
+            "    }\n",
+            "}\n",
+            "fn target() {}\n",
+        ),
+    )]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let target = graph.functions_by_name("target")[0];
+    let callers = graph.callers(target, 1);
+    assert_eq!(callers.len(), 1, "dispatch should appear once");
+    assert_eq!(callers[0].function, "dispatch");
+    // The caller should have conditions from ALL edges, not just the first
+    // (This test verifies the fix — previously only the first edge's conditions were kept)
+}
+
+#[test]
+fn graph_unreachable_catches_self_recursive_dead_code() {
+    // Issue #3: Self-recursive function with no external callers should
+    // be detected as unreachable.
+    let (_dir, repo_path) = init_test_repo(&[(
+        "src/main.rs",
+        "fn main() { used(); }\nfn used() {}\nfn orphan() { orphan(); }\n",
+    )]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let unreachable = graph.unreachable_functions();
+    let names: Vec<&str> = unreachable
+        .iter()
+        .map(|n| graph.function_name(*n))
+        .collect();
+    assert!(
+        names.contains(&"orphan"),
+        "self-recursive orphan should be unreachable, got: {names:?}"
+    );
+}
+
+#[test]
+fn graph_unreachable_does_not_exclude_struct_method_named_main() {
+    // Issue #4: Foo::main (a struct method) should appear in unreachable
+    // results — only the true entry point main (no :: in qualified name)
+    // should be excluded.
+    let (_dir, repo_path) = init_test_repo(&[(
+        "src/main.rs",
+        concat!(
+            "fn main() {}\n",
+            "struct Foo;\n",
+            "impl Foo {\n",
+            "    fn main() {}\n",
+            "}\n",
+        ),
+    )]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let unreachable = graph.unreachable_functions();
+    let names: Vec<&str> = unreachable
+        .iter()
+        .map(|n| graph.function_qualified_name(*n))
+        .collect();
+    // Qualified names include module path (e.g., "src::Foo::main")
+    assert!(
+        names.iter().any(|n| n.ends_with("Foo::main")),
+        "Foo::main should be unreachable, got: {names:?}"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.ends_with("::main") && !n.contains("Foo")),
+        "true main should NOT be unreachable, got: {names:?}"
+    );
 }

@@ -171,14 +171,26 @@ impl Graph {
                 continue;
             }
             let next_depth = current_depth + 1;
+
+            // Group backward edges by caller to merge conditions from
+            // multiple call sites (e.g., calls from different if-branches).
+            let mut caller_edges: std::collections::HashMap<usize, Vec<usize>> =
+                std::collections::HashMap::new();
             for &edge_idx in &payload.backward_calls[current_idx] {
-                let edge = &payload.graph.edges[edge_idx];
-                let caller_idx = edge.caller;
-                if visited.contains(&caller_idx) {
-                    continue;
+                let caller_idx = payload.graph.edges[edge_idx].caller;
+                if !visited.contains(&caller_idx) {
+                    caller_edges.entry(caller_idx).or_default().push(edge_idx);
                 }
+            }
+
+            for (caller_idx, edge_indices) in caller_edges {
                 visited.insert(caller_idx);
                 let caller_node = &payload.graph.nodes[caller_idx];
+                let mut conditions: Vec<String> = Vec::new();
+                for &edge_idx in &edge_indices {
+                    conditions.extend(payload.graph.edges[edge_idx].conditions.iter().cloned());
+                }
+                conditions.dedup();
                 result.push(Caller {
                     file: caller_node.file.clone(),
                     function: caller_node.name.clone(),
@@ -186,7 +198,7 @@ impl Graph {
                     line: caller_node.line,
                     is_test: caller_node.is_test,
                     depth: next_depth,
-                    conditions: edge.conditions.clone(),
+                    conditions,
                 });
                 queue.push_back((caller_idx, next_depth));
             }
@@ -198,17 +210,20 @@ impl Graph {
     /// Return the direct callees of `node` (functions called by `node`).
     ///
     /// Each callee appears at most once, even if called from multiple sites.
+    ///
+    /// Note: scans all edges O(E) because no forward-call index exists.
+    /// `callers()` and `fan_in()` use the pre-built backward index for
+    /// O(degree) lookups; a symmetric `forward_calls` index would fix this.
     pub fn callees(&self, node: NodeId) -> Vec<NodeId> {
         let payload = self.payload();
-        let mut seen = HashSet::new();
-        payload
+        let unique: HashSet<usize> = payload
             .graph
             .edges
             .iter()
             .filter(|edge| edge.caller == node.0)
-            .filter(|edge| seen.insert(edge.callee))
-            .map(|edge| NodeId(edge.callee))
-            .collect()
+            .map(|edge| edge.callee)
+            .collect();
+        unique.into_iter().map(NodeId).collect()
     }
 
     /// Number of unique functions that directly call `node`.
@@ -238,12 +253,27 @@ impl Graph {
             .enumerate()
             .filter(|(idx, node)| {
                 !node.is_test
-                    && node.name != "main"
-                    && p.backward_calls[*idx].is_empty()
+                    && !Self::is_entry_point(node)
+                    // Filter out self-edges: a self-recursive function with no
+                    // external callers is still unreachable.
+                    && p.backward_calls[*idx]
+                        .iter()
+                        .all(|&edge_idx| p.graph.edges[edge_idx].caller == *idx)
                     && p.backward_references[*idx].is_empty()
             })
             .map(|(idx, _)| NodeId(idx))
             .collect()
+    }
+
+    /// True if this node is a program entry point (`fn main()` at module level).
+    /// Impl methods like `Foo::main` are NOT entry points.
+    fn is_entry_point(node: &crate::analysis::codepaths::GraphNode) -> bool {
+        node.name == "main"
+            && node
+                .qualified_name
+                .rsplit("::")
+                .nth(1)
+                .is_none_or(|parent| !parent.starts_with(char::is_uppercase))
     }
 
     /// Return all reference sites where `node` is referenced (e.g., passed as an argument).
