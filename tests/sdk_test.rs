@@ -147,3 +147,12 @@ fn caller_and_reference_have_expected_fields() {
     };
     assert!(reference.context.is_some());
 }
+
+#[test]
+fn graph_load_rejects_subdirectory_path() {
+    let (_dir, repo_path) = init_test_repo(&[
+        ("src/main.rs", "fn main() {}\n"),
+    ]);
+    let result = Graph::load(repo_path.join("src"));
+    assert!(result.is_err(), "loading a subdirectory should fail, not silently produce a wrong graph");
+}

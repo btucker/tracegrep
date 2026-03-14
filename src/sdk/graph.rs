@@ -33,14 +33,23 @@ impl Graph {
             path: repo_path.clone(),
         })?;
 
-        // Verify git repo (supports worktrees where .git is a file)
+        // Verify this is a git repo root, not a subdirectory.
+        // .git can be a directory (normal repo) or a file (worktree).
         if !repo_path.join(".git").exists() {
+            // No .git at this path — check if it's inside a repo (subdirectory)
             let git_check = std::process::Command::new("git")
-                .args(["rev-parse", "--git-dir"])
+                .args(["rev-parse", "--show-toplevel"])
                 .current_dir(&repo_path)
                 .output();
             match git_check {
-                Ok(output) if output.status.success() => {}
+                Ok(output) if output.status.success() => {
+                    let toplevel = PathBuf::from(
+                        String::from_utf8_lossy(&output.stdout).trim(),
+                    );
+                    if toplevel.canonicalize().ok().as_ref() != Some(&repo_path) {
+                        return Err(Error::NotGitRepo { path: repo_path });
+                    }
+                }
                 _ => return Err(Error::NotGitRepo { path: repo_path }),
             }
         }
