@@ -150,14 +150,37 @@ impl Graph {
         self.payload().graph.nodes[node.0].is_test
     }
 
-    /// Files that changed since the last index build.
-    /// Empty if the cache was fully reused.
+    // --- Incremental Analysis ---
+
+    /// Whether this graph was loaded incrementally from cache.
+    ///
+    /// When `false` (full rebuild), [`changed_files`](Self::changed_files) and
+    /// [`changed_functions`](Self::changed_functions) return *all* files and
+    /// functions, not just those that actually changed. Callers performing
+    /// incremental analysis should check this to decide whether the results
+    /// represent a targeted diff or a full scan.
+    pub fn is_incremental(&self) -> bool {
+        matches!(
+            self.loaded.outcome.mode,
+            crate::graph_cache::LoadGraphMode::Incremental
+        )
+    }
+
+    /// Files that were re-parsed during this graph load.
+    ///
+    /// On an incremental load ([`is_incremental`](Self::is_incremental) returns `true`),
+    /// this contains only the files whose contents changed since the last index build.
+    /// On a full rebuild (first load or cache miss), this contains *all* files in the repo.
+    /// Empty when the cache was fully reused (no files changed).
     pub fn changed_files(&self) -> &[String] {
         &self.loaded.outcome.changed_files
     }
 
-    /// Functions defined in files that changed since the last index build.
-    /// This is the core loop for incremental analysis: only check changed functions.
+    /// Functions defined in files returned by [`changed_files`](Self::changed_files).
+    ///
+    /// This is the core primitive for incremental analysis: load the graph, then
+    /// only inspect functions in changed files. On a full rebuild, this returns
+    /// all functions — use [`is_incremental`](Self::is_incremental) to distinguish.
     pub fn changed_functions(&self) -> Vec<NodeId> {
         let changed: HashSet<&str> = self
             .loaded

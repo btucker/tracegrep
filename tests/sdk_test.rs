@@ -217,11 +217,10 @@ fn graph_changed_files_detects_modifications() {
 
     // Rebuild — should see changed file
     let graph = Graph::load(&repo_path).unwrap();
+    assert!(graph.is_incremental(), "should be an incremental rebuild");
     let changed = graph.changed_files();
-    assert!(
-        changed.contains(&"src/main.rs".to_string()),
-        "changed_files: {changed:?}"
-    );
+    assert_eq!(changed.len(), 1, "only one file changed, got: {changed:?}");
+    assert_eq!(changed[0], "src/main.rs");
 }
 
 #[test]
@@ -259,8 +258,25 @@ fn graph_changed_files_empty_on_cache_hit() {
     let _ = Graph::load(&repo_path).unwrap();
     // Second build without modifications — full cache hit
     let graph = Graph::load(&repo_path).unwrap();
+    assert!(!graph.is_incremental(), "cache reuse is not incremental");
     assert!(graph.changed_files().is_empty(), "no files changed");
     assert!(graph.changed_functions().is_empty(), "no functions changed");
+}
+
+#[test]
+fn graph_changed_functions_returns_all_on_full_rebuild() {
+    let (_dir, repo_path) = init_test_repo(&[
+        ("src/main.rs", "fn main() {}\n"),
+        ("src/lib.rs", "fn helper() {}\n"),
+    ]);
+    // First load is always a full rebuild — no prior cache
+    let graph = Graph::load(&repo_path).unwrap();
+    assert!(!graph.is_incremental(), "first load should be a full rebuild");
+    // On full rebuild, changed_functions returns ALL functions
+    let changed = graph.changed_functions();
+    let names: Vec<&str> = changed.iter().map(|n| graph.function_name(*n)).collect();
+    assert!(names.contains(&"main"), "full rebuild should include main");
+    assert!(names.contains(&"helper"), "full rebuild should include helper");
 }
 
 #[test]
