@@ -22,8 +22,6 @@ pub enum Error {
 }
 
 impl Error {
-    // Used by Graph wrapper (task 22+) to convert internal anyhow errors.
-    #[allow(dead_code)]
     pub(crate) fn from_anyhow(err: anyhow::Error) -> Self {
         Error::Internal(format!("{err:#}"))
     }
