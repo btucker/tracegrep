@@ -211,6 +211,41 @@ impl Graph {
             .collect()
     }
 
+    /// Number of unique functions that directly call `node`.
+    pub fn fan_in(&self, node: NodeId) -> usize {
+        let p = self.payload();
+        p.backward_calls[node.0]
+            .iter()
+            .map(|&edge_idx| p.graph.edges[edge_idx].caller)
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
+    /// Number of functions `node` calls.
+    pub fn fan_out(&self, node: NodeId) -> usize {
+        self.callees(node).len()
+    }
+
+    /// Functions with zero callers and zero references (potential dead code).
+    ///
+    /// Excludes `main` and test functions. Other entry points (e.g., library
+    /// exports, framework-annotated handlers) may still appear in results.
+    pub fn unreachable_functions(&self) -> Vec<NodeId> {
+        let p = self.payload();
+        p.graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(idx, node)| {
+                !node.is_test
+                    && node.name != "main"
+                    && p.backward_calls[*idx].is_empty()
+                    && p.backward_references[*idx].is_empty()
+            })
+            .map(|(idx, _)| NodeId(idx))
+            .collect()
+    }
+
     /// Return all reference sites where `node` is referenced (e.g., passed as an argument).
     pub fn references(&self, node: NodeId) -> Vec<Reference> {
         let payload = self.payload();

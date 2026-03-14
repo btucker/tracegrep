@@ -266,6 +266,33 @@ fn graph_references_returns_reference_sites() {
 }
 
 #[test]
+fn graph_fan_in_and_fan_out() {
+    let (_dir, repo_path) = init_test_repo(&[(
+        "src/main.rs",
+        "fn a() { c(); }\nfn b() { c(); }\nfn c() { d(); e(); }\nfn d() {}\nfn e() {}\n",
+    )]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let c = graph.functions_by_name("c")[0];
+    assert_eq!(graph.fan_in(c), 2, "c is called by a and b");
+    assert_eq!(graph.fan_out(c), 2, "c calls d and e");
+}
+
+#[test]
+fn graph_unreachable_functions_finds_dead_code() {
+    let (_dir, repo_path) = init_test_repo(&[(
+        "src/main.rs",
+        "fn main() { used(); }\nfn used() {}\nfn dead() {}\n",
+    )]);
+    let graph = Graph::load(&repo_path).unwrap();
+
+    let unreachable = graph.unreachable_functions();
+    let names: Vec<&str> = unreachable.iter().map(|n| graph.function_name(*n)).collect();
+    assert!(names.contains(&"dead"), "dead should be unreachable, got: {names:?}");
+    assert!(!names.contains(&"used"), "used should not be unreachable, got: {names:?}");
+}
+
+#[test]
 fn graph_callers_handles_cycles() {
     let (_dir, repo_path) = init_test_repo(&[(
         "src/main.rs",
