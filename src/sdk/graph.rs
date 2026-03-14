@@ -107,8 +107,15 @@ impl Graph {
     }
 
     // --- Accessors ---
+    //
+    // All accessor methods below require that `node` was obtained from this
+    // same `Graph` instance. Using a `NodeId` from a different `Graph` will
+    // panic with an index-out-of-bounds error.
 
     /// Simple function name.
+    ///
+    /// # Panics
+    /// Panics if `node` did not originate from this `Graph`.
     pub fn function_name(&self, node: NodeId) -> &str {
         &self.payload().graph.nodes[node.0].name
     }

@@ -11,7 +11,7 @@ fn init_test_repo(files: &[(&str, &str)]) -> (tempfile::TempDir, std::path::Path
         std::fs::write(full_path, contents).unwrap();
     }
     let git = |args: &[&str]| {
-        Command::new("git")
+        let output = Command::new("git")
             .args(args)
             .current_dir(dir.path())
             .env("GIT_AUTHOR_NAME", "Test")
@@ -19,7 +19,9 @@ fn init_test_repo(files: &[(&str, &str)]) -> (tempfile::TempDir, std::path::Path
             .env("GIT_COMMITTER_NAME", "Test")
             .env("GIT_COMMITTER_EMAIL", "test@test.com")
             .output()
-            .unwrap()
+            .unwrap();
+        assert!(output.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr));
+        output
     };
     git(&["init"]);
     git(&["config", "user.email", "test@test.com"]);
