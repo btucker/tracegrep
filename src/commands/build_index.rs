@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::Path;
 
 use crate::graph_cache::{load_or_build_query_cache, LoadGraphMode};
@@ -17,7 +18,8 @@ pub fn run(options: BuildIndexOptions<'_>) -> anyhow::Result<()> {
         LoadGraphMode::Incremental => "Updated index",
         LoadGraphMode::Reused => "Index already up to date",
     };
-    println!("{message} for {}", repo_path.display());
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{message} for {}", repo_path.display())?;
     timings.print("build-index");
     Ok(())
 }
