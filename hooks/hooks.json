@@ -1,0 +1,16 @@
+{
+  "description": "Block the Grep and Search tools and redirect Claude to use tg via Bash",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Search",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh ${CLAUDE_PLUGIN_ROOT}/hooks/block_grep_hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

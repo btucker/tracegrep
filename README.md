@@ -107,6 +107,7 @@ tg --generate complete-zsh | head
 ```
 
 In Claude Code, start a fresh session and ask it to search the repo. It should prefer `tg`/`tracegrep`-aware search flow rather than raw `rg`.
+When installed as a Claude Code plugin, `tracegrep` also ships a `PreToolUse` hook for the `Grep` and `Search` tools that blocks direct usage and tells Claude to run `tg` through the `Bash` tool instead. This does not block `grep` or `tg` commands that Claude runs inside `Bash`.
 
 ## Usage
 

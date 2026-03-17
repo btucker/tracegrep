@@ -1,12 +1,20 @@
+use std::io::Write;
+use std::process::ExitCode;
+
 use tracegrep::cli::Cli;
 use tracegrep::commands;
 use tracegrep::completions;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
+    tracegrep::cli_exit_code(run())
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse()?;
 
     if let Some(target) = cli.generate.as_deref() {
-        print!("{}", completions::generate(target)?);
+        let mut stdout = std::io::stdout().lock();
+        write!(stdout, "{}", completions::generate(target)?)?;
         Ok(())
     } else if cli.install_completions.is_some() {
         let shell_arg = cli
@@ -14,12 +22,13 @@ fn main() -> anyhow::Result<()> {
             .as_deref()
             .filter(|value| *value != "auto");
         let result = completions::install(shell_arg)?;
-        println!("Installed {:?} completions.", result.shell);
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "Installed {:?} completions.", result.shell)?;
         for path in result.written_files {
-            println!("  wrote {}", path.display());
+            writeln!(stdout, "  wrote {}", path.display())?;
         }
         for path in result.updated_rc_files {
-            println!("  updated {}", path.display());
+            writeln!(stdout, "  updated {}", path.display())?;
         }
         Ok(())
     } else if cli.build_index {
