@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
@@ -210,15 +209,16 @@ fn test_query_exits_cleanly_on_broken_pipe() {
         .spawn()
         .unwrap();
 
-    let mut stdout = child.stdout.take().unwrap();
-    let mut buffer = [0_u8; 128];
-    let bytes_read = stdout.read(&mut buffer).unwrap();
-    assert!(bytes_read > 0, "expected tracegrep to produce some output");
-    drop(stdout);
+    drop(child.stdout.take());
 
     let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("Broken pipe"),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
