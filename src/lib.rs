@@ -7,6 +7,7 @@ pub mod commands;
 pub mod completions;
 pub mod graph_cache;
 pub mod query_data;
+pub mod sdk;
 pub mod timing;
 
 pub fn cli_exit_code(result: anyhow::Result<()>) -> ExitCode {
